@@ -12,10 +12,11 @@ import os
 import io
 import re
 import hashlib
+import unicodedata
 from datetime import datetime
 
 DB_FILE = "processos_db.json"
-LOGO_FILE = "logo dourado grahl consultoria.jpg"
+LOGO_FILE = "logo dourado grahl consultoria.png"
 FOTOS_DIR = os.path.abspath("fotos_uploads")
 
 os.makedirs(FOTOS_DIR, exist_ok=True)
@@ -91,59 +92,141 @@ dados_padrao = {
     "campo_fotos": []
 }
 
+def remover_acentos(texto):
+    if not texto or not isinstance(texto, str):
+        return ""
+    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
+
 def parse_pre_relatorio(doc):
     dados = {}
     texto_paragrafos = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
     texto = texto_paragrafos.replace("**", "").replace("*", "")
-    
-    for linha in texto.split('\n'):
+    linhas = [l.strip() for l in texto.split('\n') if l.strip()]
+
+    field_matchers = [
+        ("número do processo", "processo_num"),
+        ("órgão julgador", "orgao_julgador"),
+        ("data de autuação", "data_autuacao"),
+        ("ajuizamento", "data_autuacao"),
+        ("valor da causa", "valor_causa"),
+        ("rito processual", "rito_processual"),
+        ("reclamante (autor/autora)", "reclamante_nome"),
+        ("nome do segurado", "reclamante_nome"),
+        ("reclamante", "reclamante_nome"),
+        ("reclamada (ré/empresa)", "reclamada_nome"),
+        ("empresa / tomador", "reclamada_nome"),
+        ("reclamada", "reclamada_nome"),
+        ("data de admissão", "data_admissao"),
+        ("status do contrato", "status_contrato"),
+        ("período imprescrito", "periodo_imprescrito"),
+        ("cargo(s) / função(ões)", "cargos"),
+        ("profissão / cargo", "profissao_cargo"),
+        ("setor / lotação", "setor"),
+        ("última remuneração", "ultima_remuneracao"),
+        ("objeto da perícia", "objeto_pericia"),
+        ("atividades descritas", "atividades_inicial"),
+        ("atividades típicas", "relato_inicial"),
+        ("agentes nocivos", "agentes_alegados"),
+        ("pedidos técnicos", "pedidos_tecnicos"),
+        ("preliminares periciais", "preliminares_periciais"),
+        ("defesa de mérito", "defesa_merito_sst"),
+        ("fase processual", "fase_processual"),
+        ("data da vistoria", "campo_data"),
+        ("horário", "campo_horario"),
+        ("local / endereço", "local_diligencia"),
+        ("ltcat", "doc_ltcat"),
+        ("laudo de insalubridade", "doc_laudo"),
+        ("ppp", "doc_ppp"),
+        ("pgr / ppra", "doc_pgr"),
+        ("ordens de serviço", "doc_os"),
+        ("asos / pcmsos", "doc_asos"),
+        ("outros documentos", "doc_outros"),
+        ("9.1. quesitos do juízo", "quesitos_juizo"),
+        ("quesitos do juízo", "quesitos_juizo"),
+        ("9.2. quesitos do reclamante", "quesitos_autor"),
+        ("quesitos do reclamante", "quesitos_autor"),
+        ("quesitos do autor", "quesitos_autor"),
+        ("9.3. quesitos da reclamada", "quesitos_reu"),
+        ("quesitos da reclamada", "quesitos_reu"),
+        ("quesitos da ré", "quesitos_reu")
+    ]
+    sorted_matchers = sorted(field_matchers, key=lambda x: len(x[0]), reverse=True)
+
+    current_key = None
+    current_buffer = []
+    last_entity = None
+
+    def save_current():
+        if current_key and current_buffer:
+            val = "\n".join(current_buffer).strip()
+            if val and "[informação/documento não localizado" not in val.lower():
+                dados[current_key] = val
+
+    for linha in linhas:
+        if re.match(r'^\d+(\.\d*)*[\s\.\-]+[A-ZÀ-Ú]', linha) and ":" not in linha:
+            save_current()
+            current_key = None
+            current_buffer = []
+            continue
+
+        matched = False
         if ":" in linha:
             parts = linha.split(":", 1)
-            chave = parts[0].strip().lower()
-            valor = parts[1].strip()
-            
-            if not valor or len(valor) < 2:
+            prefix = parts[0].strip().lower()
+            rest = parts[1].strip()
+
+            if "advogado" in prefix:
+                save_current()
+                if last_entity == "reclamante":
+                    dados["reclamante_adv"] = rest
+                elif last_entity == "reclamada":
+                    dados["reclamada_adv"] = rest
+                else:
+                    if not dados.get("reclamante_adv"):
+                        dados["reclamante_adv"] = rest
+                    else:
+                        dados["reclamada_adv"] = rest
+                current_key = None
+                current_buffer = []
+                matched = True
                 continue
-                
-            if any(k in chave for k in ["número do processo", "processo", "protocolo", "identificação"]) and not dados.get("processo_num"):
-                dados["processo_num"] = valor
-            elif any(k in chave for k in ["órgão julgador", "vara", "tribunal"]) and not dados.get("orgao_julgador"):
-                dados["orgao_julgador"] = valor
-            elif any(k in chave for k in ["data de autuação", "ajuizamento"]) and not dados.get("data_autuacao"):
-                dados["data_autuacao"] = valor
-            elif any(k in chave for k in ["valor da causa"]) and not dados.get("valor_causa"):
-                dados["valor_causa"] = valor
-            elif any(k in chave for k in ["rito processual"]) and not dados.get("rito_processual"):
-                dados["rito_processual"] = valor
-            elif any(k in chave for k in ["reclamante", "nome do segurado", "autor/autora", "nome"]) and not dados.get("reclamante_nome"):
-                m_cpf = re.search(r"(?:CPF/NIT|CPF|NIT|PIS):\s*([\d\.-]+)", valor, re.IGNORECASE)
-                if m_cpf:
-                    dados["reclamante_cpf"] = m_cpf.group(1)
-                    dados["reclamante_nome"] = re.sub(r"\((?:CPF/NIT|CPF|NIT|PIS):.*?\)", "", valor, flags=re.IGNORECASE).strip()
-                else:
-                    dados["reclamante_nome"] = valor
-            elif any(k in chave for k in ["reclamada", "empresa", "tomador", "empregador", "razão social", "ré"]) and not dados.get("reclamada_nome"):
-                m_cnpj = re.search(r"CNPJ:\s*([\d\.\-/]+)", valor, re.IGNORECASE)
-                if m_cnpj:
-                    dados["reclamada_cnpj"] = m_cnpj.group(1)
-                    dados["reclamada_nome"] = re.sub(r"\(CNPJ:.*?\)", "", valor, flags=re.IGNORECASE).strip()
-                else:
-                    dados["reclamada_nome"] = valor
-            elif any(k in chave for k in ["data de admissão"]) and not dados.get("data_admissao"):
-                dados["data_admissao"] = valor
-            elif any(k in chave for k in ["status do contrato"]) and not dados.get("status_contrato"):
-                dados["status_contrato"] = valor
-            elif any(k in chave for k in ["período imprescrito", "período"]) and not dados.get("periodo_imprescrito"):
-                dados["periodo_imprescrito"] = valor
-            elif any(k in chave for k in ["cargo", "função", "profissão"]) and not dados.get("cargos"):
-                dados["cargos"] = valor
-                dados["profissao_cargo"] = valor
-            elif any(k in chave for k in ["setor", "lotação", "local de trabalho"]) and not dados.get("setor"):
-                dados["setor"] = valor
-            elif any(k in chave for k in ["última remuneração"]) and not dados.get("ultima_remuneracao"):
-                dados["ultima_remuneracao"] = valor
-            elif any(k in chave for k in ["objeto da perícia", "objeto"]) and not dados.get("objeto_pericia"):
-                dados["objeto_pericia"] = valor
+
+            matched_key = None
+            for kw, d_key in sorted_matchers:
+                if kw in prefix:
+                    matched_key = d_key
+                    break
+
+            if matched_key:
+                save_current()
+                current_key = matched_key
+                current_buffer = [rest] if rest else []
+                matched = True
+
+                if "reclamante" in matched_key or "autor" in prefix or "segurado" in prefix:
+                    last_entity = "reclamante"
+                    if rest:
+                        m_cpf = re.search(r"(?:CPF/NIT|CPF|NIT|PIS|CPF):\s*([\d\.-]+)", rest, re.IGNORECASE)
+                        if m_cpf:
+                            dados["reclamante_cpf"] = m_cpf.group(1)
+                            dados["reclamante_nome"] = re.sub(r"\((?:CPF/NIT|CPF|NIT|PIS|CPF):.*?\)", "", rest, flags=re.IGNORECASE).strip()
+                        else:
+                            dados["reclamante_nome"] = rest
+                elif "reclamada" in matched_key or ("empresa" in prefix and "reclamada" not in matched_key) or "ré" in prefix or "tomador" in prefix:
+                    last_entity = "reclamada"
+                    if rest:
+                        m_cnpj = re.search(r"CNPJ:\s*([\d\.\-\/]+)", rest, re.IGNORECASE)
+                        if m_cnpj:
+                            dados["reclamada_cnpj"] = m_cnpj.group(1)
+                            dados["reclamada_nome"] = re.sub(r"\(CNPJ:.*?\)", "", rest, flags=re.IGNORECASE).strip()
+                        else:
+                            dados["reclamada_nome"] = rest
+
+        if not matched and current_key:
+            if linha:
+                current_buffer.append(linha)
+
+    save_current()
 
     epis_extraidos = []
     for table in doc.tables:
@@ -158,7 +241,7 @@ def parse_pre_relatorio(doc):
                     obs = cells[3].text.strip() if len(cells) > 3 else ""
                     
                     desc = desc.replace("**", "").replace("*", "")
-                    if desc and "[extrair" not in desc.lower() and "---" not in desc:
+                    if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
                         epis_extraidos.append({
                             "descricao": desc,
                             "ca": ca,
@@ -167,7 +250,9 @@ def parse_pre_relatorio(doc):
                         })
                 break
 
-    dados["quadro_epis"] = epis_extraidos
+    if epis_extraidos:
+        dados["quadro_epis"] = epis_extraidos
+
     return dados
 
 def carregar_dados():
@@ -219,6 +304,10 @@ if "gps_field_main" not in st.session_state:
     st.session_state.gps_field_main = ""
 if "confirmar_exclusao_dupla" not in st.session_state:
     st.session_state.confirmar_exclusao_dupla = False
+if "menu_opcao" not in st.session_state:
+    st.session_state.menu_opcao = "➕ Novo Processo / Caso"
+if "termo_busca" not in st.session_state:
+    st.session_state.termo_busca = ""
 
 if "gps" in st.query_params:
     st.session_state.gps_field_main = st.query_params["gps"]
@@ -240,11 +329,34 @@ st.markdown("""
     section[data-testid="stSidebar"] label {
         color: #FFFFFF !important;
     }
-    section[data-testid="stSidebar"] .stRadio label p,
     section[data-testid="stSidebar"] .stSelectbox label p {
         color: #E2E8F0 !important;
         font-size: 16px !important;
         font-weight: 600 !important;
+    }
+    /* Estilização dos botões do Painel de Controle no Sidebar com cores distintas e caixas maiores */
+    section[data-testid="stSidebar"] .stButton button {
+        width: 100% !important;
+        border-radius: 12px !important;
+        padding: 14px 18px !important;
+        font-size: 15px !important;
+        font-weight: 700 !important;
+        color: white !important;
+        border: 2px solid rgba(255,255,255,0.25) !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2) !important;
+        margin-bottom: 10px !important;
+        text-align: left !important;
+        transition: all 0.2s ease;
+    }
+    section[data-testid="stSidebar"] .stButton:nth-of-type(1) button { background-color: #2563EB !important; }
+    section[data-testid="stSidebar"] .stButton:nth-of-type(2) button { background-color: #0D9488 !important; }
+    section[data-testid="stSidebar"] .stButton:nth-of-type(3) button { background-color: #16A34A !important; }
+    section[data-testid="stSidebar"] .stButton:nth-of-type(4) button { background-color: #DC2626 !important; }
+    section[data-testid="stSidebar"] .stButton:nth-of-type(5) button { background-color: #9333EA !important; }
+
+    section[data-testid="stSidebar"] .stButton button:hover {
+        filter: brightness(1.15) !important;
+        transform: translateY(-2px);
     }
     div.block-container {
         padding-top: 2rem;
@@ -323,29 +435,79 @@ with col_titulo:
 
 st.markdown("<hr style='margin-top: 1rem; margin-bottom: 1.5rem; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
 
+# Painel de Controle no Sidebar com Botões Estilizados e Coloridos
 st.sidebar.markdown("<h2 style='color: #FFFFFF; font-size: 1.3rem; margin-bottom: 1rem;'>📁 Painel de Controle</h2>", unsafe_allow_html=True)
-opcao = st.sidebar.radio("Selecione a Ação:", ["➕ Novo Processo / Caso", "✏️ Dados, Escritório & SST", "🚜 Diligência de Campo & Fotos", "🗑️ Excluir Processo", "📄 Gerar Documento Word Final"], label_visibility="collapsed")
+
+acoes_menu = [
+    "➕ Novo Processo / Caso", 
+    "✏️ Dados, Escritório & SST", 
+    "🚜 Diligência de Campo & Fotos", 
+    "🗑️ Excluir Processo", 
+    "📄 Gerar Documento Word Final"
+]
+
+for acao in acoes_menu:
+    if st.sidebar.button(acao, key=f"btn_menu_sidebar_{acao}", use_container_width=True):
+        st.session_state.menu_opcao = acao
+        st.rerun()
+
+opcao = st.session_state.menu_opcao
 
 st.sidebar.markdown("<hr style='border: none; height: 1px; background-color: rgba(255,255,255,0.2); margin: 1.5rem 0;'>", unsafe_allow_html=True)
 st.sidebar.markdown("<p style='color: #FFFFFF; font-weight: 600; font-size: 14px; margin-bottom: 0.3rem;'>🔎 Pesquisa Rápida:</p>", unsafe_allow_html=True)
-termo_busca_geral = st.sidebar.text_input("Busca", placeholder="ID, Processo ou Nome...", label_visibility="collapsed").strip().lower()
+
+termo_busca_geral = st.sidebar.text_input(
+    "Busca", 
+    placeholder="ID, Processo, Nome ou Empresa...", 
+    label_visibility="collapsed", 
+    key="termo_busca"
+).strip()
+
+# Sistema de busca robusto com suporte a acentos e termos parciais
+processos_filtrados = []
+termo_limpo = remover_acentos(termo_busca_geral)
 
 if db_processos:
-    processos_filtrados = [
-        k for k, v in db_processos.items()
-        if termo_busca_geral in k.lower() or 
-           termo_busca_geral in v.get("processo_num", "").lower() or 
-           termo_busca_geral in v.get("reclamada_nome", "").lower() or
-           termo_busca_geral in v.get("reclamante_nome", "").lower()
-    ]
-else:
-    processos_filtrados = []
+    for k, v in db_processos.items():
+        if not termo_limpo:
+            processos_filtrados.append(k)
+        else:
+            id_norm = remover_acentos(k)
+            proc_num_norm = remover_acentos(str(v.get("processo_num", "")))
+            reclamada_norm = remover_acentos(str(v.get("reclamada_nome", "")))
+            reclamante_norm = remover_acentos(str(v.get("reclamante_nome", "")))
+            
+            if (termo_limpo in id_norm or 
+                termo_limpo in proc_num_norm or 
+                termo_limpo in reclamada_norm or 
+                termo_limpo in reclamante_norm):
+                processos_filtrados.append(k)
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
-processo_id_selecionado = st.sidebar.selectbox(
-    "Processo / Caso Selecionado:",
-    options=processos_filtrados if processos_filtrados else (list(db_processos.keys()) if db_processos else ["Nenhum caso cadastrado"])
-)
+if processos_filtrados:
+    mapa_opcoes = {}
+    for k in processos_filtrados:
+        v = db_processos[k]
+        nome = v.get("reclamante_nome", "Sem Nome")
+        empresa = v.get("reclamada_nome", "")
+        num_p = v.get("processo_num", "")
+        
+        label = f"[{k}] {nome}"
+        if empresa:
+            label += f" x {empresa}"
+        elif num_p:
+            label += f" ({num_p})"
+        mapa_opcoes[label] = k
+
+    label_selecionado = st.sidebar.selectbox(
+        "Processo / Caso Selecionado:",
+        options=list(mapa_opcoes.keys()),
+        key="selectbox_processo_ativo"
+    )
+    processo_id_selecionado = mapa_opcoes.get(label_selecionado, "Nenhum caso cadastrado")
+else:
+    st.sidebar.warning("⚠️ Nenhum caso encontrado.")
+    processo_id_selecionado = "Nenhum caso cadastrado"
 
 if opcao == "➕ Novo Processo / Caso":
     st.markdown("### Cadastrar Novo Caso ou Processo")
@@ -1238,14 +1400,14 @@ elif opcao == "📄 Gerar Documento Word Final":
                 adicionar_linha_vazia()
                 add_topic_block(doc, "Síntese e Análise Crítica de EPIs", p.get('analise_epis_critica', ''))
 
-                adicionar_titulo("9. QUESITOS FORMULADOS PARA LA PERÍCIA", level=2)
+                adicionar_titulo("9. QUESITOS FORMULADOS PARA A PERÍCIA", level=2)
                 add_topic_block(doc, "9.1. Quesitos do Juízo", p.get('quesitos_juizo', ''))
                 add_topic_block(doc, "9.2. Quesitos do Reclamante", p.get('quesitos_autor', ''))
                 add_topic_block(doc, "9.3. Quesitos da Reclamada", p.get('quesitos_reu', ''))
 
                 adicionar_titulo("10. LEVANTAMENTOS DE CAMPO (DILIGÊNCIA & EVIDÊNCIAS)", level=2)
                 add_topic_block(doc, "Informações prestadas pelo Autor", p.get('campo_declaracoes_autor', ''))
-                add_topic_block(doc, "Informações prestadas pela Ré", p.get('campo_declaracoes_reu', ''))
+                add_topic_block(doc, "Informações prestadas pelo Ré", p.get('campo_declaracoes_reu', ''))
                 add_topic_block(doc, "Medições Realizadas", p.get('campo_medicoes', ''))
 
             if p.get("campo_fotos"):
