@@ -334,7 +334,7 @@ st.markdown("""
         font-size: 16px !important;
         font-weight: 600 !important;
     }
-    /* Estilização dos botões do Painel de Controle no Sidebar com cores distintas e caixas maiores */
+    /* Estilização dos botões do Painel de Controle no Sidebar */
     section[data-testid="stSidebar"] .stButton button {
         width: 100% !important;
         border-radius: 12px !important;
@@ -381,12 +381,19 @@ st.markdown("""
         border-radius: 8px !important;
         font-size: 16px !important;
     }
-    /* Ajuste automático e responsivo para caixas de texto no tablet e desktop */
-    textarea {
+    
+    /* Força a expansão automática e remove barras de rolagem internas em textareas */
+    .stTextArea textarea {
         height: auto !important;
-        min-height: 100px !important;
-        resize: vertical !important;
+        min-height: 140px !important;
+        max-height: none !important;
+        overflow-y: hidden !important;
+        resize: none !important;
     }
+    .stTextArea div[data-baseweb="base-input"] {
+        height: auto !important;
+    }
+
     .stButton button {
         background-color: #1B365D !important;
         color: white !important;
