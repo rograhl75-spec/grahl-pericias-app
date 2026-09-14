@@ -97,6 +97,16 @@ def remover_acentos(texto):
         return ""
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
 
+def calcula_altura(texto, min_h):
+    """Calcula a altura ideal do textarea com base no volume de texto."""
+    if not texto: 
+        return min_h
+    texto_str = str(texto)
+    linhas_quebradas = texto_str.count('\n') + 1
+    caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
+    calc = (linhas_quebradas + caracteres_extras_wrap) * 24 + 40
+    return max(min_h, calc)
+
 def parse_pre_relatorio(doc):
     dados = {}
     texto_paragrafos = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
@@ -382,18 +392,11 @@ st.markdown("""
         font-size: 16px !important;
     }
     
-    /* Força a expansão automática e remove barras de rolagem internas em textareas */
-    .stTextArea textarea {
-        height: auto !important;
-        min-height: 140px !important;
-        max-height: none !important;
-        overflow-y: hidden !important;
-        resize: none !important;
+    /* Configuração de Auto-resize CSS para textareas */
+    textarea {
+        field-sizing: content !important;
     }
-    .stTextArea div[data-baseweb="base-input"] {
-        height: auto !important;
-    }
-
+    
     .stButton button {
         background-color: #1B365D !important;
         color: white !important;
@@ -626,7 +629,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         p_atual["data_admissao"] = st.text_input("Período de Trabalho (Admissão - Demissão)", p_atual.get("data_admissao", ""))
 
                     st.markdown("<br>", unsafe_allow_html=True)
-                    p_atual["relato_inicial"] = st.text_area("Relato Inicial / Atividades Desenvolvidas pelo Segurado", p_atual.get("relato_inicial", ""), height=120)
+                    val_relato = p_atual.get("relato_inicial", "")
+                    p_atual["relato_inicial"] = st.text_area("Relato Inicial / Atividades Desenvolvidas pelo Segurado", val_relato, height=calcula_altura(val_relato, 120))
                     
                     if st.form_submit_button("💾 Salvar Dados do Segurado"):
                         db_processos[processo_id_selecionado] = p_atual
@@ -636,16 +640,20 @@ elif opcao == "✏️ Dados, Escritório & SST":
             with tab2:
                 st.markdown("### 2. Análise Preliminar de Riscos (APR-HO) & Extemporaneidade (Art. 279 da IN 128/2022)")
                 with st.form("form_prev_2"):
-                    p_atual["apr_fisicos"] = st.text_area("Agentes Físicos Presumidos (Ex: Ruído NHO-01, Calor IBUTG)", p_atual.get("apr_fisicos", ""), height=80)
-                    p_atual["apr_quimicos"] = st.text_area("Agentes Químicos (Ex: Hidrocarbonetos, Solventes, LINACH)", p_atual.get("apr_quimicos", ""), height=80)
-                    p_atual["apr_biologicos"] = st.text_area("Agentes Biológicos (Se aplicável)", p_atual.get("apr_biologicos", ""), height=80)
+                    v_fis = p_atual.get("apr_fisicos", "")
+                    v_qui = p_atual.get("apr_quimicos", "")
+                    v_bio = p_atual.get("apr_biologicos", "")
+                    p_atual["apr_fisicos"] = st.text_area("Agentes Físicos Presumidos (Ex: Ruído NHO-01, Calor IBUTG)", v_fis, height=calcula_altura(v_fis, 80))
+                    p_atual["apr_quimicos"] = st.text_area("Agentes Químicos (Ex: Hidrocarbonetos, Solventes, LINACH)", v_qui, height=calcula_altura(v_qui, 80))
+                    p_atual["apr_biologicos"] = st.text_area("Agentes Biológicos (Se aplicável)", v_bio, height=calcula_altura(v_bio, 80))
                     
                     st.markdown("#### Avaliação de Extemporaneidade (Art. 279, IN 128/2022):")
                     p_atual["extemp_layout"] = st.checkbox("Houve mudança no layout ou organização do ambiente?", value=p_atual.get("extemp_layout", False))
                     p_atual["extemp_maquinas"] = st.checkbox("Houve substituição de máquinas ou equipamentos?", value=p_atual.get("extemp_maquinas", False))
                     p_atual["extemp_epc"] = st.checkbox("Houve alteração nas tecnologias de proteção coletiva (EPC)?", value=p_atual.get("extemp_epc", False))
                     
-                    p_atual["extemp_justificativa"] = st.text_area("Fundamentação Técnica da Equivalência (Extemporaneidade)", p_atual.get("extemp_justificativa", ""), height=100)
+                    v_ext = p_atual.get("extemp_justificativa", "")
+                    p_atual["extemp_justificativa"] = st.text_area("Fundamentação Técnica da Equivalência (Extemporaneidade)", v_ext, height=calcula_altura(v_ext, 100))
 
                     if st.form_submit_button("💾 Salvar APR e Extemporaneidade"):
                         db_processos[processo_id_selecionado] = p_atual
@@ -683,7 +691,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 with st.form("form_prev_analise_epi"):
-                    p_atual["analise_epis_critica"] = st.text_area("Análise Crítica da Eficácia dos EPIs (Tema 555 STF / Súmula 9 TNU)", p_atual.get("analise_epis_critica", ""), height=120)
+                    v_epi = p_atual.get("analise_epis_critica", "")
+                    p_atual["analise_epis_critica"] = st.text_area("Análise Crítica da Eficácia dos EPIs (Tema 555 STF / Súmula 9 TNU)", v_epi, height=calcula_altura(v_epi, 120))
                     if st.form_submit_button("💾 Salvar Análise Crítica"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
@@ -693,7 +702,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                 st.markdown("### 4. Metodologia (NHO-01 Fundacentro) & Enquadramento Legal")
                 with st.form("form_prev_4"):
                     p_atual["enquadramento_legal_prev"] = st.text_input("Enquadramento Legal (Decreto 3.048/99 - Anexo IV)", p_atual.get("enquadramento_legal_prev", ""))
-                    p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação Ambiental (Ex: Ruído NHO-01, q=5, NEN, Critérios Químicos LINACH)", p_atual.get("doc_ltcat", ""), height=150)
+                    v_met = p_atual.get("doc_ltcat", "")
+                    p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação Ambiental (Ex: Ruído NHO-01, q=5, NEN, Critérios Químicos LINACH)", v_met, height=calcula_altura(v_met, 150))
                     
                     if st.form_submit_button("💾 Salvar Metodologia"):
                         db_processos[processo_id_selecionado] = p_atual
@@ -755,11 +765,21 @@ elif opcao == "✏️ Dados, Escritório & SST":
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     p_atual["objeto_pericia"] = st.text_input("Objeto de Análise / Perícia", p_atual.get("objeto_pericia", ""))
-                    p_atual["atividades_inicial"] = st.text_area("Atividades Descritas na Inicial", p_atual.get("atividades_inicial", ""), height=100)
-                    p_atual["agentes_alegados"] = st.text_area("Agentes Nocivos / Riscos Alegados", p_atual.get("agentes_alegados", ""), height=100)
-                    p_atual["pedidos_tecnicos"] = st.text_area("Pedidos Técnicos (Grau, Enquadramento, PPP)", p_atual.get("pedidos_tecnicos", ""), height=100)
-                    p_atual["preliminares_periciais"] = st.text_area("Preliminares Periciais (Contestação)", p_atual.get("preliminares_periciais", ""), height=100)
-                    p_atual["defesa_merito_sst"] = st.text_area("Defesa de Mérito SST (Contestação)", p_atual.get("defesa_merito_sst", ""), height=120)
+                    
+                    v_ati = p_atual.get("atividades_inicial", "")
+                    p_atual["atividades_inicial"] = st.text_area("Atividades Descritas na Inicial", v_ati, height=calcula_altura(v_ati, 100))
+                    
+                    v_age = p_atual.get("agentes_alegados", "")
+                    p_atual["agentes_alegados"] = st.text_area("Agentes Nocivos / Riscos Alegados", v_age, height=calcula_altura(v_age, 100))
+                    
+                    v_ped = p_atual.get("pedidos_tecnicos", "")
+                    p_atual["pedidos_tecnicos"] = st.text_area("Pedidos Técnicos (Grau, Enquadramento, PPP)", v_ped, height=calcula_altura(v_ped, 100))
+                    
+                    v_pre = p_atual.get("preliminares_periciais", "")
+                    p_atual["preliminares_periciais"] = st.text_area("Preliminares Periciais (Contestação)", v_pre, height=calcula_altura(v_pre, 100))
+                    
+                    v_def = p_atual.get("defesa_merito_sst", "")
+                    p_atual["defesa_merito_sst"] = st.text_area("Defesa de Mérito SST (Contestação)", v_def, height=calcula_altura(v_def, 120))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Contrato e Sínteses"):
@@ -781,13 +801,26 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["local_diligencia"] = st.text_input("Local / Endereço da Diligência", p_atual.get("local_diligencia", ""))
 
                     st.markdown("<br>", unsafe_allow_html=True)
-                    p_atual["doc_ltcat"] = st.text_area("Análise do LTCAT", p_atual.get("doc_ltcat", ""), height=90)
-                    p_atual["doc_laudo"] = st.text_area("Análise de Laudos Prévios / Paradigmas", p_atual.get("doc_laudo", ""), height=90)
-                    p_atual["doc_ppp"] = st.text_area("Análise do PPP (Agentes, Responsáveis, EPI)", p_atual.get("doc_ppp", ""), height=90)
-                    p_atual["doc_pgr"] = st.text_area("Análise do PGR / PPRA / PCMAT", p_atual.get("doc_pgr", ""), height=90)
-                    p_atual["doc_os"] = st.text_area("Ordens de Serviço e Treinamentos", p_atual.get("doc_os", ""), height=90)
-                    p_atual["doc_asos"] = st.text_area("ASOs / PCMSO (Aptidão e Riscos)", p_atual.get("doc_asos", ""), height=90)
-                    p_atual["doc_outros"] = st.text_area("Outros Documentos Relevantes (FISPQs, etc.)", p_atual.get("doc_outros", ""), height=90)
+                    v_ltc = p_atual.get("doc_ltcat", "")
+                    p_atual["doc_ltcat"] = st.text_area("Análise do LTCAT", v_ltc, height=calcula_altura(v_ltc, 90))
+                    
+                    v_lau = p_atual.get("doc_laudo", "")
+                    p_atual["doc_laudo"] = st.text_area("Análise de Laudos Prévios / Paradigmas", v_lau, height=calcula_altura(v_lau, 90))
+                    
+                    v_ppp = p_atual.get("doc_ppp", "")
+                    p_atual["doc_ppp"] = st.text_area("Análise do PPP (Agentes, Responsáveis, EPI)", v_ppp, height=calcula_altura(v_ppp, 90))
+                    
+                    v_pgr = p_atual.get("doc_pgr", "")
+                    p_atual["doc_pgr"] = st.text_area("Análise do PGR / PPRA / PCMAT", v_pgr, height=calcula_altura(v_pgr, 90))
+                    
+                    v_dos = p_atual.get("doc_os", "")
+                    p_atual["doc_os"] = st.text_area("Ordens de Serviço e Treinamentos", v_dos, height=calcula_altura(v_dos, 90))
+                    
+                    v_aso = p_atual.get("doc_asos", "")
+                    p_atual["doc_asos"] = st.text_area("ASOs / PCMSO (Aptidão e Riscos)", v_aso, height=calcula_altura(v_aso, 90))
+                    
+                    v_out = p_atual.get("doc_outros", "")
+                    p_atual["doc_outros"] = st.text_area("Outros Documentos Relevantes (FISPQs, etc.)", v_out, height=calcula_altura(v_out, 90))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Vistoria e Documentos SST"):
@@ -827,7 +860,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                 st.markdown("<br>---<br>", unsafe_allow_html=True)
 
                 with st.form("form_analise_epi"):
-                    p_atual["analise_epis_critica"] = st.text_area("Síntese e Análise Crítica de EPIs", p_atual.get("analise_epis_critica", ""), height=180)
+                    v_epi2 = p_atual.get("analise_epis_critica", "")
+                    p_atual["analise_epis_critica"] = st.text_area("Síntese e Análise Crítica de EPIs", v_epi2, height=calcula_altura(v_epi2, 180))
                     if st.form_submit_button("💾 Salvar Análise Crítica de EPIs"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
@@ -836,9 +870,14 @@ elif opcao == "✏️ Dados, Escritório & SST":
             with tab5:
                 st.markdown("### 9. Quesitos Formulados para a Perícia (Transcrição Literal)")
                 with st.form("form_quesitos"):
-                    p_atual["quesitos_juizo"] = st.text_area("9.1. Quesitos do Juízo", p_atual.get("quesitos_juizo", ""), height=150)
-                    p_atual["quesitos_autor"] = st.text_area("9.2. Quesitos do Reclamante (Autor/Autora)", p_atual.get("quesitos_autor", ""), height=250)
-                    p_atual["quesitos_reu"] = st.text_area("9.3. Quesitos da Reclamada (Ré / Empresa)", p_atual.get("quesitos_reu", ""), height=250)
+                    v_q1 = p_atual.get("quesitos_juizo", "")
+                    p_atual["quesitos_juizo"] = st.text_area("9.1. Quesitos do Juízo", v_q1, height=calcula_altura(v_q1, 150))
+                    
+                    v_q2 = p_atual.get("quesitos_autor", "")
+                    p_atual["quesitos_autor"] = st.text_area("9.2. Quesitos do Reclamante (Autor/Autora)", v_q2, height=calcula_altura(v_q2, 250))
+                    
+                    v_q3 = p_atual.get("quesitos_reu", "")
+                    p_atual["quesitos_reu"] = st.text_area("9.3. Quesitos da Reclamada (Ré / Empresa)", v_q3, height=calcula_altura(v_q3, 250))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Quesitos Literais"):
@@ -864,9 +903,15 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
 
             st.markdown("<br>", unsafe_allow_html=True)
             p_atual["local_diligencia"] = st.text_input("Endereço / Local da Diligência", p_atual.get("local_diligencia", ""))
-            p_atual["campo_declaracoes_autor"] = st.text_area("Informações prestadas pelo Segurado / Autor", p_atual.get("campo_declaracoes_autor", ""), height=120)
-            p_atual["campo_declaracoes_reu"] = st.text_area("Informações prestadas pelo Empregador / Acompanhante", p_atual.get("campo_declaracoes_reu", ""), height=120)
-            p_atual["campo_medicoes"] = st.text_area("Medições Realizadas em Campo (Ex: Sonometria NHO-01, IBUTG)", p_atual.get("campo_medicoes", ""), height=120)
+            
+            v_ca = p_atual.get("campo_declaracoes_autor", "")
+            p_atual["campo_declaracoes_autor"] = st.text_area("Informações prestadas pelo Segurado / Autor", v_ca, height=calcula_altura(v_ca, 120))
+            
+            v_cr = p_atual.get("campo_declaracoes_reu", "")
+            p_atual["campo_declaracoes_reu"] = st.text_area("Informações prestadas pelo Empregador / Acompanhante", v_cr, height=calcula_altura(v_cr, 120))
+            
+            v_cm = p_atual.get("campo_medicoes", "")
+            p_atual["campo_medicoes"] = st.text_area("Medições Realizadas em Campo (Ex: Sonometria NHO-01, IBUTG)", v_cm, height=calcula_altura(v_cm, 120))
 
             st.markdown("<br>", unsafe_allow_html=True)
             if st.form_submit_button("💾 Salvar Textos de Campo"):
@@ -941,6 +986,21 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         st.innerHTML = "Geolocalização não suportada.";
                     }
                 }
+                
+                // Script injetado para auto-expandir caixas de texto em tempo real no tablet
+                setInterval(function() {
+                    const textareas = window.parent.document.querySelectorAll("textarea");
+                    textareas.forEach(ta => {
+                        if(ta.scrollHeight > ta.clientHeight) {
+                            ta.style.height = 'auto';
+                            ta.style.height = ta.scrollHeight + 'px';
+                        }
+                        ta.addEventListener('input', function() {
+                            this.style.height = 'auto';
+                            this.style.height = this.scrollHeight + 'px';
+                        });
+                    });
+                }, 1000);
                 </script>
             </div>
         """, height=95)
