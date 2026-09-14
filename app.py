@@ -381,6 +381,12 @@ st.markdown("""
         border-radius: 8px !important;
         font-size: 16px !important;
     }
+    /* Ajuste automático e responsivo para caixas de texto no tablet e desktop */
+    textarea {
+        height: auto !important;
+        min-height: 100px !important;
+        resize: vertical !important;
+    }
     .stButton button {
         background-color: #1B365D !important;
         color: white !important;
