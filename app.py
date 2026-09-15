@@ -58,6 +58,7 @@ dados_padrao = {
     "campo_data": datetime.now().strftime("%d/%m/%Y"),
     "campo_horario": "14:00",
     "local_diligencia": "",
+    "presentes_pericia": "",
 
     "doc_ltcat": "",
     "doc_laudo": "",
@@ -98,7 +99,6 @@ def remover_acentos(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
 
 def calcula_altura(texto, min_h):
-    """Calcula a altura ideal do textarea com base no volume de texto."""
     if not texto: 
         return min_h
     texto_str = str(texto)
@@ -593,6 +593,7 @@ if opcao == "➕ Novo Processo / Caso":
             db_processos[proximo_id] = p_novo
             salvar_dados(db_processos)
             st.session_state.parsed_data = {}
+            st.toast(f"✅ Caso {proximo_id} criado com sucesso!", icon="💾")
             st.success(f"Caso '{proximo_id}' criado com sucesso! Selecione-o no menu lateral.")
             st.rerun()
 
@@ -615,7 +616,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
             
             with tab1:
                 st.markdown("### 1. Identificação do Segurado e da Empresa")
-                with st.form("form_prev_1"):
+                with st.form(f"form_prev_1_{processo_id_selecionado}"):
                     col1, col2 = st.columns(2)
                     with col1:
                         p_atual["reclamante_nome"] = st.text_input("Nome do Segurado", p_atual.get("reclamante_nome", ""))
@@ -635,11 +636,12 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar Dados do Segurado"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Dados salvos com sucesso!")
+                        st.toast("✅ Dados do Segurado salvos!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab2:
                 st.markdown("### 2. Análise Preliminar de Riscos (APR-HO) & Extemporaneidade (Art. 279 da IN 128/2022)")
-                with st.form("form_prev_2"):
+                with st.form(f"form_prev_2_{processo_id_selecionado}"):
                     v_fis = p_atual.get("apr_fisicos", "")
                     v_qui = p_atual.get("apr_quimicos", "")
                     v_bio = p_atual.get("apr_biologicos", "")
@@ -658,7 +660,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar APR e Extemporaneidade"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Salvo com sucesso!")
+                        st.toast("✅ APR salva com sucesso!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab3:
                 st.markdown("### 3. Planilha de EPIs & Eficácia (Tema 555 STF)")
@@ -687,20 +690,22 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
                     db_processos[processo_id_selecionado] = p_atual
                     salvar_dados(db_processos)
-                    st.success("EPIs atualizados com sucesso!")
+                    st.toast("✅ Planilha de EPIs salva!", icon="💾")
+                    st.success("✅ EPIs atualizados com sucesso.")
 
                 st.markdown("<br>", unsafe_allow_html=True)
-                with st.form("form_prev_analise_epi"):
+                with st.form(f"form_prev_analise_epi_{processo_id_selecionado}"):
                     v_epi = p_atual.get("analise_epis_critica", "")
                     p_atual["analise_epis_critica"] = st.text_area("Análise Crítica da Eficácia dos EPIs (Tema 555 STF / Súmula 9 TNU)", v_epi, height=calcula_altura(v_epi, 120))
                     if st.form_submit_button("💾 Salvar Análise Crítica"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Salvo com sucesso!")
+                        st.toast("✅ Análise Crítica salva!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab4:
                 st.markdown("### 4. Metodologia (NHO-01 Fundacentro) & Enquadramento Legal")
-                with st.form("form_prev_4"):
+                with st.form(f"form_prev_4_{processo_id_selecionado}"):
                     p_atual["enquadramento_legal_prev"] = st.text_input("Enquadramento Legal (Decreto 3.048/99 - Anexo IV)", p_atual.get("enquadramento_legal_prev", ""))
                     v_met = p_atual.get("doc_ltcat", "")
                     p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação Ambiental (Ex: Ruído NHO-01, q=5, NEN, Critérios Químicos LINACH)", v_met, height=calcula_altura(v_met, 150))
@@ -708,7 +713,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar Metodologia"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Salvo com sucesso!")
+                        st.toast("✅ Metodologia salva!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
         else:
             tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -721,7 +727,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
             
             with tab1:
                 st.markdown("### 1. Papel Profissional, Tipos de Perícia & Identificação")
-                with st.form("form_sec1"):
+                with st.form(f"form_sec1_{processo_id_selecionado}"):
                     col_p1, col_p2 = st.columns(2)
                     with col_p1:
                         p_atual["papel_profissional"] = st.selectbox("Meu Papel no Processo", ["Perito do Juízo", "Assistente Técnico da Reclamante", "Assistente Técnico da Reclamada"], index=["Perito do Juízo", "Assistente Técnico da Reclamante", "Assistente Técnico da Reclamada"].index(p_atual.get("papel_profissional", "Assistente Técnico da Reclamada")) if p_atual.get("papel_profissional") in ["Perito do Juízo", "Assistente Técnico da Reclamante", "Assistente Técnico da Reclamada"] else 2)
@@ -748,11 +754,12 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar Papel, Identificação e Partes"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Dados salvos com sucesso!")
+                        st.toast("✅ Identificação salva!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab2:
                 st.markdown("### 3. Dados do Contrato & 4/5. Sínteses da Inicial e Defesa")
-                with st.form("form_sec2"):
+                with st.form(f"form_sec2_{processo_id_selecionado}"):
                     col3, col4 = st.columns(2)
                     with col3:
                         p_atual["data_admissao"] = st.text_input("Data de Admissão", p_atual.get("data_admissao", ""))
@@ -785,11 +792,12 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar Contrato e Sínteses"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Dados salvos com sucesso!")
+                        st.toast("✅ Contrato e Sínteses salvos!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab3:
                 st.markdown("### 6. Vistoria & 7. Análise de Documentos de SST")
-                with st.form("form_sec3"):
+                with st.form(f"form_sec3_{processo_id_selecionado}"):
                     col5, col6, col7 = st.columns(3)
                     with col5:
                         p_atual["fase_processual"] = st.text_input("Fase Processual Atual", p_atual.get("fase_processual", ""))
@@ -826,7 +834,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar Vistoria e Documentos SST"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Dados salvos com sucesso!")
+                        st.toast("✅ Análises de Documentos salvas!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab4:
                 st.markdown("### 8. Quadro de Fornecimento de EPIs & Análise Crítica")
@@ -855,21 +864,23 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
                     db_processos[processo_id_selecionado] = p_atual
                     salvar_dados(db_processos)
-                    st.success("Quadro de EPIs atualizado com sucesso!")
+                    st.toast("✅ Quadro de EPIs salvo!", icon="💾")
+                    st.success("✅ Quadro de EPIs atualizado com sucesso.")
 
                 st.markdown("<br>---<br>", unsafe_allow_html=True)
 
-                with st.form("form_analise_epi"):
+                with st.form(f"form_analise_epi_{processo_id_selecionado}"):
                     v_epi2 = p_atual.get("analise_epis_critica", "")
                     p_atual["analise_epis_critica"] = st.text_area("Síntese e Análise Crítica de EPIs", v_epi2, height=calcula_altura(v_epi2, 180))
                     if st.form_submit_button("💾 Salvar Análise Crítica de EPIs"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Análise crítica salva com sucesso!")
+                        st.toast("✅ Análise Crítica salva!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab5:
                 st.markdown("### 9. Quesitos Formulados para a Perícia (Transcrição Literal)")
-                with st.form("form_quesitos"):
+                with st.form(f"form_quesitos_{processo_id_selecionado}"):
                     v_q1 = p_atual.get("quesitos_juizo", "")
                     p_atual["quesitos_juizo"] = st.text_area("9.1. Quesitos do Juízo", v_q1, height=calcula_altura(v_q1, 150))
                     
@@ -883,7 +894,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     if st.form_submit_button("💾 Salvar Quesitos Literais"):
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
-                        st.success("Quesitos salvos com sucesso!")
+                        st.toast("✅ Quesitos salvos!", icon="💾")
+                        st.success("✅ As informações foram atualizadas com sucesso.")
 
 elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
@@ -894,7 +906,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown(f"<div style='background-color: #E2E8F0; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px;'><b style='color: #1B365D;'>Caso Ativo:</b> {processo_id_selecionado} &nbsp;|&nbsp; <b style='color: #1B365D;'>Módulo:</b> {p_atual.get('modulo_atuacao', '')}</div>", unsafe_allow_html=True)
 
         st.markdown("### 🚜 Vistoria Pericial de Campo, Declarações & Evidências")
-        with st.form("form_campo"):
+        with st.form(f"form_campo_{processo_id_selecionado}"):
             col_c1, col_c2 = st.columns(2)
             with col_c1:
                 p_atual["campo_data"] = st.text_input("Data da Vistoria", p_atual.get("campo_data", ""))
@@ -903,6 +915,9 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
 
             st.markdown("<br>", unsafe_allow_html=True)
             p_atual["local_diligencia"] = st.text_input("Endereço / Local da Diligência", p_atual.get("local_diligencia", ""))
+            
+            v_pres = p_atual.get("presentes_pericia", "")
+            p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes na Vistoria (Nome e Função)", v_pres, height=calcula_altura(v_pres, 80))
             
             v_ca = p_atual.get("campo_declaracoes_autor", "")
             p_atual["campo_declaracoes_autor"] = st.text_area("Informações prestadas pelo Segurado / Autor", v_ca, height=calcula_altura(v_ca, 120))
@@ -917,12 +932,13 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             if st.form_submit_button("💾 Salvar Textos de Campo"):
                 db_processos[processo_id_selecionado] = p_atual
                 salvar_dados(db_processos)
-                st.success("Textos de campo salvos com sucesso!")
+                st.toast("✅ Textos de campo salvos!", icon="💾")
+                st.success("✅ As informações de campo foram atualizadas com sucesso.")
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         st.markdown("#### 📍 Captura Rápida de GPS (Híbrido: Satélite ou Rede)")
         
-        gps_input_val = st.text_input("Coordenada GPS Atual (Sessão Ativa):", value=st.session_state.get("gps_field_main", ""), key="gps_field_main_input", placeholder="GPS_TARGET_FIELD")
+        gps_input_val = st.text_input("Coordenada GPS Atual (Sessão Ativa):", value=st.session_state.get("gps_field_main", ""), key=f"gps_field_main_input_{processo_id_selecionado}", placeholder="GPS_TARGET_FIELD")
         if gps_input_val != st.session_state.get("gps_field_main", ""):
             st.session_state.gps_field_main = gps_input_val
 
@@ -1009,7 +1025,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("#### 📸 Captura de Evidências Fotográficas")
         
         # Opção 1: Câmera Direta (Webcam no PC / Câmera no Tablet)
-        img_camera = st.camera_input("📷 Tirar Foto Direta (Webcam / Câmera do Dispositivo)")
+        img_camera = st.camera_input("📷 Tirar Foto Direta (Webcam / Câmera do Dispositivo)", key=f"cam_{processo_id_selecionado}")
         if img_camera is not None:
             file_bytes = img_camera.getvalue()
             file_hash = hashlib.md5(file_bytes).hexdigest()[:10]
@@ -1027,6 +1043,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                     "legenda": "Registro fotográfico obtido em diligência pericial."
                 })
                 salvar_dados(db_processos)
+                st.toast("✅ Foto adicionada!", icon="📸")
                 st.success("✅ Foto capturada e adicionada ao relatório!")
                 st.rerun()
 
@@ -1036,12 +1053,13 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         # Opção 2: Envio de Arquivos / Galeria
         col_up1, col_up2 = st.columns([3, 1])
         with col_up1:
-            fotos_upload = st.file_uploader("📁 Ou Enviar Foto(s) da Galeria / Arquivos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            fotos_upload = st.file_uploader("📁 Ou Enviar Foto(s) da Galeria / Arquivos", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"up_{processo_id_selecionado}")
         with col_up2:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🗑️ Limpar Todas"):
+            if st.button("🗑️ Limpar Todas", key=f"clear_fotos_{processo_id_selecionado}"):
                 p_atual["campo_fotos"] = []
                 salvar_dados(db_processos)
+                st.toast("✅ Lista de fotos limpa!", icon="🗑️")
                 st.success("Lista limpa!")
                 st.rerun()
 
@@ -1067,6 +1085,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             
             if novas_fotos:
                 salvar_dados(db_processos)
+                st.toast("✅ Foto(s) enviada(s)!", icon="📸")
                 st.success("Foto(s) adicionada(s) com sucesso!")
                 st.rerun()
 
@@ -1075,12 +1094,13 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         with col_ger:
             st.markdown(f"#### 🖼️ Gerenciar Fotos Cadastradas ({len(p_atual.get('campo_fotos', []))} fotos):")
         with col_btn_geral:
-            if st.button("⚡ Salvar GPS em Todas as Fotos"):
+            if st.button("⚡ Salvar GPS em Todas as Fotos", key=f"save_gps_all_{processo_id_selecionado}"):
                 gps_atual_sessao = st.session_state.get("gps_field_main", "")
                 if gps_atual_sessao:
                     for f_dict in p_atual["campo_fotos"]:
                         f_dict["gps"] = gps_atual_sessao
                     salvar_dados(db_processos)
+                    st.toast("✅ Coordenadas salvas em lote!", icon="📍")
                     st.success("GPS salvo em todas as fotos!")
                     st.rerun()
                 else:
@@ -1098,21 +1118,23 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         else:
                             st.warning("[Arquivo não encontrado]")
                     with col_dados:
-                        nova_legenda = st.text_input(f"Legenda da Figura {idx+1}", value=foto_dict.get("legenda", ""), key=f"leg_{idx}")
-                        novo_gps = st.text_input(f"Coordenadas GPS (Figura {idx+1})", value=foto_dict.get("gps", ""), key=f"gps_{idx}", placeholder="GPS_FOTO")
+                        nova_legenda = st.text_input(f"Legenda da Figura {idx+1}", value=foto_dict.get("legenda", ""), key=f"leg_{processo_id_selecionado}_{idx}")
+                        novo_gps = st.text_input(f"Coordenadas GPS (Figura {idx+1})", value=foto_dict.get("gps", ""), key=f"gps_{processo_id_selecionado}_{idx}", placeholder="GPS_FOTO")
                         
                         c_salvar, c_del = st.columns(2)
                         with c_salvar:
-                            if st.button(f"💾 Atualizar Foto {idx+1}", key=f"save_f_{idx}Y"):
+                            if st.button(f"💾 Atualizar Foto {idx+1}", key=f"save_f_{processo_id_selecionado}_{idx}"):
                                 p_atual["campo_fotos"][idx]["legenda"] = nova_legenda
                                 p_atual["campo_fotos"][idx]["gps"] = novo_gps
                                 salvar_dados(db_processos)
+                                st.toast("✅ Legenda atualizada!", icon="💾")
                                 st.success("Atualizado!")
                                 st.rerun()
                         with c_del:
-                            if st.button(f"🗑️ Excluir Foto {idx+1}", key=f"del_foto_{idx}Y"):
+                            if st.button(f"🗑️ Excluir Foto {idx+1}", key=f"del_f_{processo_id_selecionado}_{idx}"):
                                 p_atual["campo_fotos"].pop(idx)
                                 salvar_dados(db_processos)
+                                st.toast("🗑️ Foto removida!")
                                 st.rerun()
                     st.markdown("---")
 
@@ -1144,6 +1166,7 @@ elif opcao == "🗑️ Excluir Processo":
                     del db_processos[processo_id_selecionado]
                     salvar_dados(db_processos)
                     st.session_state.confirmar_exclusao_dupla = False
+                    st.toast("🗑️ Processo excluído!", icon="🚨")
                     st.success(f"Caso {processo_id_selecionado} excluído com sucesso!")
                     st.rerun()
             with col_nao:
@@ -1479,6 +1502,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                 add_topic_block(doc, "9.3. Quesitos da Reclamada", p.get('quesitos_reu', ''))
 
                 adicionar_titulo("10. LEVANTAMENTOS DE CAMPO (DILIGÊNCIA & EVIDÊNCIAS)", level=2)
+                add_topic_block(doc, "Pessoas Presentes na Vistoria", p.get('presentes_pericia', ''))
                 add_topic_block(doc, "Informações prestadas pelo Autor", p.get('campo_declaracoes_autor', ''))
                 add_topic_block(doc, "Informações prestadas pelo Ré", p.get('campo_declaracoes_reu', ''))
                 add_topic_block(doc, "Medições Realizadas", p.get('campo_medicoes', ''))
@@ -1513,6 +1537,7 @@ elif opcao == "📄 Gerar Documento Word Final":
             doc.save(buffer)
             buffer.seek(0)
 
+            st.toast("✅ Documento Word Finalizado!", icon="📄")
             st.success("✅ Documento Oficial formatado com sucesso!")
             st.download_button(
                 label="📥 Baixar Documento Oficial (.docx)",
