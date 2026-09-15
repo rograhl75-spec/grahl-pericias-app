@@ -110,7 +110,6 @@ def calcula_altura(texto, min_h):
 def parse_pre_relatorio(doc):
     dados = {}
     
-    # Extrai texto de parágrafos e tabelas garantindo que não perderemos nada
     linhas = []
     for p in doc.paragraphs:
         linhas.append(p.text)
@@ -120,22 +119,19 @@ def parse_pre_relatorio(doc):
 
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
     
-    # Função interna para limpar linhas vazias ou cheias de underscores (____)
     def clean_val(val):
         v = re.sub(r"_+", "", val)
         return v.strip()
 
-    # 1. Nome do Segurado / Reclamante
     m_nome = re.findall(r"(?:Nome do Segurado|Reclamante|Autor/Autora|Nome):\s*([^\n\|]+)", texto, re.IGNORECASE)
     for m in m_nome:
         v = clean_val(m)
-        if v and not v.lower().startswith("e cpf"): # Ignora "Nome e CPF do Acompanhante"
+        if v and not v.lower().startswith("e cpf"):
             v = re.sub(r"\(?(?:CPF|NIT|PIS).*?\)?$", "", v, flags=re.IGNORECASE).strip()
             if "reclamante_nome" not in dados:
                 dados["reclamante_nome"] = v
                 break
 
-    # 2. CPF / NIT
     m_cpf = re.findall(r"(?:CPF/NIT|CPF\s*/\s*NIT|CPF|NIT|PIS)[\s:]*([\d\.\-\/]+(?:\s*/\s*[\d\.\-\/]+)?)", texto, re.IGNORECASE)
     for m in m_cpf:
         v = clean_val(m)
@@ -143,7 +139,6 @@ def parse_pre_relatorio(doc):
             dados["reclamante_cpf"] = v
             break
 
-    # 3. Data de Nascimento
     m_nasc = re.findall(r"(?:Data de Nascimento|Nascimento):\s*([\d\/]+)", texto, re.IGNORECASE)
     for m in m_nasc:
         v = clean_val(m)
@@ -151,7 +146,6 @@ def parse_pre_relatorio(doc):
             dados["segurado_nascimento"] = v
             break
 
-    # 4. Profissão / Cargo
     m_prof = re.findall(r"(?:Profissão\s*/\s*Cargo|Cargo\(s\)|Função|Profissão):\s*([^\n\|]+)", texto, re.IGNORECASE)
     for m in m_prof:
         v = clean_val(m)
@@ -161,7 +155,6 @@ def parse_pre_relatorio(doc):
                 dados["cargos"] = v
                 break
 
-    # 5. Empresa / Reclamada (Busca Padrão)
     m_emp = re.findall(r"(?:Razão Social.*?|Empresa|Tomador|Reclamada|Ré).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
     for m in m_emp:
         v = clean_val(m)
@@ -171,15 +164,13 @@ def parse_pre_relatorio(doc):
                 dados["reclamada_nome"] = v
                 break
 
-    # 5.1 Empresa na Tabela do CNIS (Para o laudo Previdenciário Extrajudicial)
     if "reclamada_nome" not in dados:
         m_tbl = re.findall(r"\d{2}/\d{2}/\d{4}.*?\|\s*([^\|]+)\s*\|", texto)
         if m_tbl:
-            v = clean_val(m_tbl[-1]) # Pega a última empresa listada
+            v = clean_val(m_tbl[-1]) 
             if v:
                 dados["reclamada_nome"] = v
 
-    # 6. CNPJ
     m_cnpj = re.findall(r"CNPJ:\s*([\d\.\-\/]+)", texto, re.IGNORECASE)
     for m in m_cnpj:
         v = clean_val(m)
@@ -187,7 +178,6 @@ def parse_pre_relatorio(doc):
             dados["reclamada_cnpj"] = v
             break
 
-    # 7. Processo Num
     m_proc = re.findall(r"(?:Número do Processo|Processo).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
     for m in m_proc:
         v = clean_val(m)
@@ -195,7 +185,6 @@ def parse_pre_relatorio(doc):
             dados["processo_num"] = v
             break
 
-    # 8. Extração de Blocos de Texto Multilinhas (Atividades e Agentes)
     m_ativ = re.search(r"(?:Atividades Típicas Presumidas|Atividades Descritas|Relato Inicial)[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
     if m_ativ:
         v = clean_val(m_ativ.group(1))
@@ -234,7 +223,6 @@ def parse_pre_relatorio(doc):
     m_aut = re.findall(r"(?:Data de Autuação|Ajuizamento).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
     if m_aut and clean_val(m_aut[0]): dados["data_autuacao"] = clean_val(m_aut[0])
 
-    # Extração de EPIs via Tabela do Word
     epis_extraidos = []
     for table in doc.tables:
         if len(table.rows) > 0 and len(table.columns) >= 4:
@@ -274,7 +262,6 @@ def carregar_dados():
                         num = re.findall(r'\d+', k)
                         if num:
                             novo_k = f"Proc_{int(num[0]):02d}"
-                    
                     for k_padrao, v_padrao in dados_padrao.items():
                         if k_padrao not in v:
                             v[k_padrao] = v_padrao
@@ -314,6 +301,8 @@ if "gps_field_main" not in st.session_state:
     st.session_state.gps_field_main = ""
 if "confirmar_exclusao_dupla" not in st.session_state:
     st.session_state.confirmar_exclusao_dupla = False
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0  # Controle para esvaziar o uploader
 
 st.markdown("""
     <style>
@@ -322,7 +311,6 @@ st.markdown("""
     section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3, section[data-testid="stSidebar"] label { color: #FFFFFF !important; }
     section[data-testid="stSidebar"] .stSelectbox label p { color: #E2E8F0 !important; font-size: 16px !important; font-weight: 600 !important; }
     
-    /* Botões do Sidebar */
     section[data-testid="stSidebar"] .stButton button {
         width: 100% !important; border-radius: 12px !important; padding: 14px 18px !important;
         font-size: 15px !important; font-weight: 700 !important; color: white !important;
@@ -341,8 +329,6 @@ st.markdown("""
     h2, h3 { color: #1B365D !important; font-weight: 700 !important; }
     label, .stTextInput label, .stTextArea label, .stSelectbox label, .stFileUploader label { color: #1B365D !important; font-weight: 700 !important; font-size: 15px !important; }
     input, textarea { background-color: #FFFFFF !important; border: 1px solid #CBD5E1 !important; border-radius: 8px !important; font-size: 16px !important; }
-    
-    /* Configuração de Auto-resize CSS para textareas */
     textarea { field-sizing: content !important; }
     
     .stButton button {
@@ -381,7 +367,6 @@ with col_titulo:
 
 st.markdown("<hr style='margin-top: 1rem; margin-bottom: 1.5rem; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
 
-# Lógica de Menu via Callback (Destrói o ghost state ao mudar de tela)
 def trocar_menu(acao):
     st.session_state.menu_opcao = acao
 
@@ -477,7 +462,9 @@ if opcao == "➕ Novo Processo / Caso":
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📥 Importar Documento Base (.docx)")
-    arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"])
+    
+    # Uploader com chave dinâmica para esvaziar ao criar o processo
+    arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
     
     if arquivo_importado is not None:
         try:
@@ -503,9 +490,9 @@ if opcao == "➕ Novo Processo / Caso":
             lbl_emp = "Reclamada (Ré / Empresa)"
             def_num = parsed.get("processo_num", "")
 
-        p_num = st.text_input(lbl_num, value=def_num)
-        p_nome = st.text_input(lbl_nome, value=parsed.get("reclamante_nome", ""))
-        p_empresa = st.text_input(lbl_emp, value=parsed.get("reclamada_nome", ""))
+        p_num = st.text_input(lbl_num, value=def_num, key=f"novo_num_{st.session_state.uploader_key}")
+        p_nome = st.text_input(lbl_nome, value=parsed.get("reclamante_nome", ""), key=f"novo_nome_{st.session_state.uploader_key}")
+        p_empresa = st.text_input(lbl_emp, value=parsed.get("reclamada_nome", ""), key=f"novo_emp_{st.session_state.uploader_key}")
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.form_submit_button("Criar Caso Completo"):
@@ -528,8 +515,15 @@ if opcao == "➕ Novo Processo / Caso":
             
             db_processos[proximo_id] = p_novo
             salvar_dados(db_processos)
+            
+            # Zera a memória do upload e incrementa a chave para apagar o form visualmente
             st.session_state.parsed_data = {}
+            st.session_state.uploader_key += 1
+            
+            # Roteamento automático para a tela de edição
             st.session_state.processo_ativo = proximo_id
+            st.session_state.last_proc = proximo_id
+            st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
             st.toast(f"✅ Caso {proximo_id} criado com sucesso!", icon="💾")
             st.rerun()
 
