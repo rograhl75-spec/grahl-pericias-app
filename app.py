@@ -113,6 +113,7 @@ def parse_pre_relatorio(doc):
     texto = texto_paragrafos.replace("**", "").replace("*", "")
     linhas = [l.strip() for l in texto.split('\n') if l.strip()]
 
+    # Dicionário de mapeamento agora inclui vocabulário Extrajudicial Previdenciário
     field_matchers = [
         ("número do processo", "processo_num"),
         ("órgão julgador", "orgao_julgador"),
@@ -123,9 +124,16 @@ def parse_pre_relatorio(doc):
         ("reclamante (autor/autora)", "reclamante_nome"),
         ("nome do segurado", "reclamante_nome"),
         ("reclamante", "reclamante_nome"),
+        ("nome", "reclamante_nome"),
+        ("cpf/nit", "reclamante_cpf"),
+        ("cpf / nit", "reclamante_cpf"),
+        ("cpf", "reclamante_cpf"),
+        ("data de nascimento", "segurado_nascimento"),
         ("reclamada (ré/empresa)", "reclamada_nome"),
         ("empresa / tomador", "reclamada_nome"),
         ("reclamada", "reclamada_nome"),
+        ("razão social", "reclamada_nome"),
+        ("cnpj", "reclamada_cnpj"),
         ("data de admissão", "data_admissao"),
         ("status do contrato", "status_contrato"),
         ("período imprescrito", "periodo_imprescrito"),
@@ -137,6 +145,9 @@ def parse_pre_relatorio(doc):
         ("atividades descritas", "atividades_inicial"),
         ("atividades típicas", "relato_inicial"),
         ("agentes nocivos", "agentes_alegados"),
+        ("agentes físicos", "apr_fisicos"),
+        ("agentes químicos", "apr_quimicos"),
+        ("enquadramento legal", "enquadramento_legal_prev"),
         ("pedidos técnicos", "pedidos_tecnicos"),
         ("preliminares periciais", "preliminares_periciais"),
         ("defesa de mérito", "defesa_merito_sst"),
@@ -213,24 +224,22 @@ def parse_pre_relatorio(doc):
                 current_buffer = [rest] if rest else []
                 matched = True
 
-                if "reclamante" in matched_key or "autor" in prefix or "segurado" in prefix:
+                # Bloqueio específico para não sobrescrever o nome caso achem CPF na mesma linha
+                if matched_key == "reclamante_nome":
                     last_entity = "reclamante"
-                    if rest:
-                        m_cpf = re.search(r"(?:CPF/NIT|CPF|NIT|PIS|CPF):\s*([\d\.-]+)", rest, re.IGNORECASE)
-                        if m_cpf:
-                            dados["reclamante_cpf"] = m_cpf.group(1)
-                            dados["reclamante_nome"] = re.sub(r"\((?:CPF/NIT|CPF|NIT|PIS|CPF):.*?\)", "", rest, flags=re.IGNORECASE).strip()
-                        else:
-                            dados["reclamante_nome"] = rest
-                elif "reclamada" in matched_key or ("empresa" in prefix and "reclamada" not in matched_key) or "ré" in prefix or "tomador" in prefix:
+                    m_cpf = re.search(r"(?:CPF/NIT|CPF|NIT|PIS):\s*([\d\.\-\/]+)", rest, re.IGNORECASE)
+                    if m_cpf:
+                        dados["reclamante_cpf"] = m_cpf.group(1).strip()
+                        clean_name = re.sub(r"\((?:CPF/NIT|CPF|NIT|PIS).*?\)", "", rest, flags=re.IGNORECASE).strip()
+                        current_buffer = [clean_name]
+
+                elif matched_key == "reclamada_nome":
                     last_entity = "reclamada"
-                    if rest:
-                        m_cnpj = re.search(r"CNPJ:\s*([\d\.\-\/]+)", rest, re.IGNORECASE)
-                        if m_cnpj:
-                            dados["reclamada_cnpj"] = m_cnpj.group(1)
-                            dados["reclamada_nome"] = re.sub(r"\(CNPJ:.*?\)", "", rest, flags=re.IGNORECASE).strip()
-                        else:
-                            dados["reclamada_nome"] = rest
+                    m_cnpj = re.search(r"CNPJ:\s*([\d\.\-\/]+)", rest, re.IGNORECASE)
+                    if m_cnpj:
+                        dados["reclamada_cnpj"] = m_cnpj.group(1).strip()
+                        clean_name = re.sub(r"\(CNPJ:.*?\)", "", rest, flags=re.IGNORECASE).strip()
+                        current_buffer = [clean_name]
 
         if not matched and current_key:
             if linha:
@@ -500,6 +509,7 @@ if opcao == "➕ Novo Processo / Caso":
     st.markdown("<br>", unsafe_allow_html=True)
     with st.form("form_novo"):
         parsed = st.session_state.get("parsed_data", {})
+        
         if is_prev_mod:
             lbl_num = "Identificação / Protocolo ou NIT/CPF"
             lbl_nome = "Nome do Segurado"
@@ -522,6 +532,7 @@ if opcao == "➕ Novo Processo / Caso":
                 for k, v in parsed.items():
                     if v:
                         p_novo[k] = v
+            
             if is_prev_mod:
                 p_novo["modulo_atuacao"] = "Laudo Extrajudicial Previdenciário (LTCAT+PPP)"
                 p_novo["reclamante_nome"] = p_nome
@@ -618,7 +629,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     key=f"ed_pe_{processo_id_selecionado}"
                 )
 
-                if st.button("💾 Salvar Tabela de EPIs Previdenciários"):
+                if st.button("💾 Salvar Tabela de EPIs Previdenciários", key=f"btn_pe_{processo_id_selecionado}"):
                     df_clean = edited_df.fillna("")
                     df_clean = df_clean[df_clean["descricao"].astype(str).str.strip() != ""]
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
