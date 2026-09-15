@@ -306,8 +306,6 @@ def gerar_proximo_id(db):
 icon_config = LOGO_FILE if os.path.exists(LOGO_FILE) else "🛡️"
 st.set_page_config(page_title="Grahl Consultoria - Perícias e Laudos Previdenciários", page_icon=icon_config, layout="wide")
 
-if "novo_cnj_input" not in st.session_state:
-    st.session_state.novo_cnj_input = ""
 if "parsed_data" not in st.session_state:
     st.session_state.parsed_data = {}
 if "gps_field_main" not in st.session_state:
@@ -316,8 +314,6 @@ if "confirmar_exclusao_dupla" not in st.session_state:
     st.session_state.confirmar_exclusao_dupla = False
 if "menu_opcao" not in st.session_state:
     st.session_state.menu_opcao = "➕ Novo Processo / Caso"
-if "termo_busca" not in st.session_state:
-    st.session_state.termo_busca = ""
 
 if "gps" in st.query_params:
     st.session_state.gps_field_main = st.query_params["gps"]
@@ -463,7 +459,7 @@ acoes_menu = [
 ]
 
 for acao in acoes_menu:
-    if st.sidebar.button(acao, key=f"btn_menu_sidebar_{acao}", use_container_width=True):
+    if st.sidebar.button(acao, use_container_width=True):
         st.session_state.menu_opcao = acao
         st.rerun()
 
@@ -472,14 +468,9 @@ opcao = st.session_state.menu_opcao
 st.sidebar.markdown("<hr style='border: none; height: 1px; background-color: rgba(255,255,255,0.2); margin: 1.5rem 0;'>", unsafe_allow_html=True)
 st.sidebar.markdown("<p style='color: #FFFFFF; font-weight: 600; font-size: 14px; margin-bottom: 0.3rem;'>🔎 Pesquisa Rápida:</p>", unsafe_allow_html=True)
 
-termo_busca_geral = st.sidebar.text_input(
-    "Busca", 
-    placeholder="ID, Processo, Nome ou Empresa...", 
-    label_visibility="collapsed", 
-    key="termo_busca"
-).strip()
+# Campo de texto isolado sem key predefinida para não conflitar com o estado
+termo_busca_geral = st.sidebar.text_input("Busca", placeholder="ID, Processo, Nome ou Empresa...", label_visibility="collapsed").strip()
 
-# Sistema de busca robusto com suporte a acentos e termos parciais
 processos_filtrados = []
 termo_limpo = remover_acentos(termo_busca_geral)
 
@@ -501,8 +492,7 @@ if db_processos:
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 if processos_filtrados:
-    mapa_opcoes = {}
-    for k in processos_filtrados:
+    def formatar_opcao(k):
         v = db_processos[k]
         nome = v.get("reclamante_nome", "Sem Nome")
         empresa = v.get("reclamada_nome", "")
@@ -513,14 +503,14 @@ if processos_filtrados:
             label += f" x {empresa}"
         elif num_p:
             label += f" ({num_p})"
-        mapa_opcoes[label] = k
+        return label
 
-    label_selecionado = st.sidebar.selectbox(
+    # SELECTBOX SEM A PROPRIEDADE 'KEY' (Resolve o bug do ghost state)
+    processo_id_selecionado = st.sidebar.selectbox(
         "Processo / Caso Selecionado:",
-        options=list(mapa_opcoes.keys()),
-        key="selectbox_processo_ativo"
+        options=processos_filtrados,
+        format_func=formatar_opcao
     )
-    processo_id_selecionado = mapa_opcoes.get(label_selecionado, "Nenhum caso cadastrado")
 else:
     st.sidebar.warning("⚠️ Nenhum caso encontrado.")
     processo_id_selecionado = "Nenhum caso cadastrado"
@@ -534,13 +524,13 @@ if opcao == "➕ Novo Processo / Caso":
     modulo_escolhido = st.radio("Selecione o Módulo de Atuação:", [
         "⚖️ Perícia Judicial Trabalhista (SST / Insalubridade / Periculosidade / Aposentadoria Especial)", 
         "📄 Laudo Extrajudicial Previdenciário (LTCAT + PPP Extemporâneo/Contemporâneo)"
-    ], key="radio_modulo_novo")
+    ])
 
     is_prev_mod = "Previdenciário" in modulo_escolhido
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📥 Importar Documento Base (.docx)")
-    arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"], key="upload_novo_caso")
+    arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"])
     
     if arquivo_importado is not None:
         try:
@@ -566,9 +556,9 @@ if opcao == "➕ Novo Processo / Caso":
             lbl_emp = "Reclamada (Ré / Empresa)"
             def_num = parsed.get("processo_num", "")
 
-        p_num = st.text_input(lbl_num, value=def_num, key="novo_p_num")
-        p_nome = st.text_input(lbl_nome, value=parsed.get("reclamante_nome", ""), key="novo_p_nome")
-        p_empresa = st.text_input(lbl_emp, value=parsed.get("reclamada_nome", ""), key="novo_p_empresa")
+        p_num = st.text_input(lbl_num, value=def_num)
+        p_nome = st.text_input(lbl_nome, value=parsed.get("reclamante_nome", ""))
+        p_empresa = st.text_input(lbl_emp, value=parsed.get("reclamada_nome", ""))
 
         st.markdown("<br>", unsafe_allow_html=True)
         submitted_novo = st.form_submit_button("Criar Caso Completo")
@@ -594,7 +584,6 @@ if opcao == "➕ Novo Processo / Caso":
             salvar_dados(db_processos)
             st.session_state.parsed_data = {}
             st.toast(f"✅ Caso {proximo_id} criado com sucesso!", icon="💾")
-            st.success(f"Caso '{proximo_id}' criado com sucesso! Selecione-o no menu lateral.")
             st.rerun()
 
 elif opcao == "✏️ Dados, Escritório & SST":
@@ -637,7 +626,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Dados do Segurado salvos!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab2:
                 st.markdown("### 2. Análise Preliminar de Riscos (APR-HO) & Extemporaneidade (Art. 279 da IN 128/2022)")
@@ -661,7 +649,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ APR salva com sucesso!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab3:
                 st.markdown("### 3. Planilha de EPIs & Eficácia (Tema 555 STF)")
@@ -691,7 +678,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     db_processos[processo_id_selecionado] = p_atual
                     salvar_dados(db_processos)
                     st.toast("✅ Planilha de EPIs salva!", icon="💾")
-                    st.success("✅ EPIs atualizados com sucesso.")
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 with st.form(f"form_prev_analise_epi_{processo_id_selecionado}"):
@@ -701,7 +687,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Análise Crítica salva!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab4:
                 st.markdown("### 4. Metodologia (NHO-01 Fundacentro) & Enquadramento Legal")
@@ -714,7 +699,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Metodologia salva!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
         else:
             tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -756,7 +740,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Identificação salva!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab2:
                 st.markdown("### 3. Dados do Contrato & 4/5. Sínteses da Inicial e Defesa")
@@ -794,7 +777,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Contrato e Sínteses salvos!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab3:
                 st.markdown("### 6. Vistoria & 7. Análise de Documentos de SST")
@@ -836,7 +818,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Análises de Documentos salvas!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab4:
                 st.markdown("### 8. Quadro de Fornecimento de EPIs & Análise Crítica")
@@ -866,7 +847,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     db_processos[processo_id_selecionado] = p_atual
                     salvar_dados(db_processos)
                     st.toast("✅ Quadro de EPIs salvo!", icon="💾")
-                    st.success("✅ Quadro de EPIs atualizado com sucesso.")
 
                 st.markdown("<br>---<br>", unsafe_allow_html=True)
 
@@ -877,7 +857,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Análise Crítica salva!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
             with tab5:
                 st.markdown("### 9. Quesitos Formulados para a Perícia (Transcrição Literal)")
@@ -896,7 +875,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         db_processos[processo_id_selecionado] = p_atual
                         salvar_dados(db_processos)
                         st.toast("✅ Quesitos salvos!", icon="💾")
-                        st.success("✅ As informações foram atualizadas com sucesso.")
 
 elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
@@ -934,7 +912,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 db_processos[processo_id_selecionado] = p_atual
                 salvar_dados(db_processos)
                 st.toast("✅ Textos de campo salvos!", icon="💾")
-                st.success("✅ As informações de campo foram atualizadas com sucesso.")
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         st.markdown("#### 📍 Captura Rápida de GPS (Híbrido: Satélite ou Rede)")
@@ -1045,7 +1022,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 })
                 salvar_dados(db_processos)
                 st.toast("✅ Foto adicionada!", icon="📸")
-                st.success("✅ Foto capturada e adicionada ao relatório!")
                 st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -1061,7 +1037,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 p_atual["campo_fotos"] = []
                 salvar_dados(db_processos)
                 st.toast("✅ Lista de fotos limpa!", icon="🗑️")
-                st.success("Lista limpa!")
                 st.rerun()
 
         if fotos_upload:
@@ -1087,7 +1062,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             if novas_fotos:
                 salvar_dados(db_processos)
                 st.toast("✅ Foto(s) enviada(s)!", icon="📸")
-                st.success("Foto(s) adicionada(s) com sucesso!")
                 st.rerun()
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
@@ -1102,7 +1076,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         f_dict["gps"] = gps_atual_sessao
                     salvar_dados(db_processos)
                     st.toast("✅ Coordenadas salvas em lote!", icon="📍")
-                    st.success("GPS salvo em todas as fotos!")
                     st.rerun()
                 else:
                     st.warning("Obtenha o GPS no botão acima primeiro.")
@@ -1129,7 +1102,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                                 p_atual["campo_fotos"][idx]["gps"] = novo_gps
                                 salvar_dados(db_processos)
                                 st.toast("✅ Legenda atualizada!", icon="💾")
-                                st.success("Atualizado!")
                                 st.rerun()
                         with c_del:
                             if st.button(f"🗑️ Excluir Foto {idx+1}", key=f"del_f_{processo_id_selecionado}_{idx}"):
@@ -1168,7 +1140,6 @@ elif opcao == "🗑️ Excluir Processo":
                     salvar_dados(db_processos)
                     st.session_state.confirmar_exclusao_dupla = False
                     st.toast("🗑️ Processo excluído!", icon="🚨")
-                    st.success(f"Caso {processo_id_selecionado} excluído com sucesso!")
                     st.rerun()
             with col_nao:
                 if st.button("❌ Cancelar"):
