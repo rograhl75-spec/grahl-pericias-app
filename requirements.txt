@@ -2,3 +2,8 @@ streamlit
 pandas
 python-docx
 Pillow
+streamlit
+python-docx
+pandas
+Pillow
+firebase-admin
