@@ -94,8 +94,7 @@ dados_padrao = {
 }
 
 def remover_acentos(texto):
-    if not texto or not isinstance(texto, str):
-        return ""
+    if not texto or not isinstance(texto, str): return ""
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
 
 def calcula_altura(texto, min_h):
@@ -109,120 +108,17 @@ def parse_pre_relatorio(doc):
     dados = {}
     linhas = []
     for p in doc.paragraphs:
-        linhas.append(p.text)
-    for table in doc.tables:
-        for row in table.rows:
-            linhas.append(" | ".join([c.text.strip() for c in row.cells]))
-
-    texto = "\n".join(linhas).replace("**", "").replace("*", "")
+        if p.text.strip():
+            linhas.append(p.text.strip())
     
-    def clean_val(val):
-        v = re.sub(r"_+", "", val)
-        return v.strip()
-
-    m_nome = re.findall(r"(?:Nome do Segurado|Reclamante|Autor/Autora|Nome):\s*([^\n\|]+)", texto, re.IGNORECASE)
-    for m in m_nome:
-        v = clean_val(m)
-        if v and not v.lower().startswith("e cpf"):
-            v = re.sub(r"\(?(?:CPF|NIT|PIS).*?\)?$", "", v, flags=re.IGNORECASE).strip()
-            if "reclamante_nome" not in dados:
-                dados["reclamante_nome"] = v
-                break
-
-    m_cpf = re.findall(r"(?:CPF/NIT|CPF\s*/\s*NIT|CPF|NIT|PIS)[\s:]*([\d\.\-\/]+(?:\s*/\s*[\d\.\-\/]+)?)", texto, re.IGNORECASE)
-    for m in m_cpf:
-        v = clean_val(m)
-        if v and "reclamante_cpf" not in dados:
-            dados["reclamante_cpf"] = v
-            break
-
-    m_nasc = re.findall(r"(?:Data de Nascimento|Nascimento):\s*([\d\/]+)", texto, re.IGNORECASE)
-    for m in m_nasc:
-        v = clean_val(m)
-        if v and "segurado_nascimento" not in dados:
-            dados["segurado_nascimento"] = v
-            break
-
-    m_prof = re.findall(r"(?:Profissão\s*/\s*Cargo|Cargo\(s\)|Função|Profissão):\s*([^\n\|]+)", texto, re.IGNORECASE)
-    for m in m_prof:
-        v = clean_val(m)
-        if v and "do Acompanhante" not in v:
-            if "profissao_cargo" not in dados:
-                dados["profissao_cargo"] = v
-                dados["cargos"] = v
-                break
-
-    m_emp = re.findall(r"(?:Razão Social.*?|Empresa|Tomador|Reclamada|Ré).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
-    for m in m_emp:
-        v = clean_val(m)
-        if v:
-            v = re.sub(r"CNPJ:.*$", "", v, flags=re.IGNORECASE).strip()
-            if "reclamada_nome" not in dados:
-                dados["reclamada_nome"] = v
-                break
-
-    if "reclamada_nome" not in dados:
-        m_tbl = re.findall(r"\d{2}/\d{2}/\d{4}.*?\|\s*([^\|]+)\s*\|", texto)
-        if m_tbl:
-            v = clean_val(m_tbl[-1]) 
-            if v: dados["reclamada_nome"] = v
-
-    m_cnpj = re.findall(r"CNPJ:\s*([\d\.\-\/]+)", texto, re.IGNORECASE)
-    for m in m_cnpj:
-        v = clean_val(m)
-        if v and "reclamada_cnpj" not in dados:
-            dados["reclamada_cnpj"] = v
-            break
-
-    m_proc = re.findall(r"(?:Número do Processo|Processo).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
-    for m in m_proc:
-        v = clean_val(m)
-        if v and "processo_num" not in dados:
-            dados["processo_num"] = v
-            break
-
-    m_ativ = re.search(r"(?:Atividades Típicas Presumidas|Atividades Descritas|Relato Inicial)[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
-    if m_ativ:
-        v = clean_val(m_ativ.group(1))
-        if v:
-            dados["relato_inicial"] = v
-            dados["atividades_inicial"] = v
-
-    m_fis = re.search(r"Agentes Físicos[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
-    if m_fis:
-        v = clean_val(m_fis.group(1))
-        if v: dados["apr_fisicos"] = v
-
-    m_qui = re.search(r"(?:Agentes Químicos|Agentes Químicos e Periculosidade)[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
-    if m_qui:
-        v = clean_val(m_qui.group(1))
-        if v: dados["apr_quimicos"] = v
-
-    m_bio = re.search(r"Agentes Biológicos[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
-    if m_bio:
-        v = clean_val(m_bio.group(1))
-        if v: dados["apr_biologicos"] = v
-
-    m_enq = re.search(r"(?:Possível )?Enquadramento Legal[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
-    if m_enq:
-        v = clean_val(m_enq.group(1))
-        if v: dados["enquadramento_legal_prev"] = v
-
-    m_obj = re.search(r"Objetivo[\s:]*(.*?)(?=\n[A-Z][a-z]+:|\n\d+\.|$)", texto, re.IGNORECASE | re.DOTALL)
-    if m_obj:
-        v = clean_val(m_obj.group(1))
-        if v: dados["objeto_pericia"] = v
-        
-    m_vara = re.findall(r"(?:Órgão Julgador|Vara).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
-    if m_vara and clean_val(m_vara[0]): dados["orgao_julgador"] = clean_val(m_vara[0])
-
-    m_aut = re.findall(r"(?:Data de Autuação|Ajuizamento).*?:\s*([^\n\|]+)", texto, re.IGNORECASE)
-    if m_aut and clean_val(m_aut[0]): dados["data_autuacao"] = clean_val(m_aut[0])
-
+    empresas_cnis = []
     epis_extraidos = []
+    
+    # Extração de Tabelas
     for table in doc.tables:
-        if len(table.rows) > 0 and len(table.columns) >= 4:
+        if len(table.rows) > 0:
             hdr = [cell.text.lower() for cell in table.rows[0].cells]
+            # Tabela de EPI
             if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h or "cert" in h for h in hdr):
                 for row in table.rows[1:]:
                     cells = row.cells
@@ -233,10 +129,172 @@ def parse_pre_relatorio(doc):
                     desc = desc.replace("**", "").replace("*", "")
                     if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
                         epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
-                break
+            # Tabela CNIS (Módulo Extrajudicial)
+            elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
+                for row in table.rows[1:]:
+                    if len(row.cells) >= 2:
+                        emp_text = row.cells[1].text.strip()
+                        if emp_text and "AGRUPAMENTO" not in emp_text:
+                            empresas_cnis.append(emp_text)
 
     if epis_extraidos:
         dados["quadro_epis"] = epis_extraidos
+
+    texto = "\n".join(linhas).replace("**", "").replace("*", "")
+    linhas_limpas = [l.strip() for l in texto.split('\n') if l.strip()]
+
+    field_matchers = [
+        ("número do processo", "processo_num"),
+        ("órgão julgador", "orgao_julgador"),
+        ("vara", "orgao_julgador"),
+        ("data de autuação", "data_autuacao"),
+        ("ajuizamento", "data_autuacao"),
+        ("valor da causa", "valor_causa"),
+        ("rito processual", "rito_processual"),
+        ("reclamante (autor/autora)", "reclamante_nome"),
+        ("nome do segurado", "reclamante_nome"),
+        ("reclamante", "reclamante_nome"),
+        ("nome", "reclamante_nome"),
+        ("cpf/nit", "reclamante_cpf"),
+        ("cpf / nit", "reclamante_cpf"),
+        ("cpf", "reclamante_cpf"),
+        ("data de nascimento", "segurado_nascimento"),
+        ("reclamada (ré/empresa)", "reclamada_nome"),
+        ("reclamada (ré / empresa)", "reclamada_nome"),
+        ("empresa / tomador", "reclamada_nome"),
+        ("reclamada", "reclamada_nome"),
+        ("razão social", "reclamada_nome"),
+        ("cnpj", "reclamada_cnpj"),
+        ("data de admissão", "data_admissao"),
+        ("status do contrato", "status_contrato"),
+        ("período imprescrito", "periodo_imprescrito"),
+        ("cargo(s) / função(ões)", "cargos"),
+        ("profissão / cargo", "profissao_cargo"),
+        ("setor / lotação", "setor"),
+        ("última remuneração", "ultima_remuneracao"),
+        ("objeto da perícia", "objeto_pericia"),
+        ("atividades descritas", "atividades_inicial"),
+        ("atividades típicas", "relato_inicial"),
+        ("agentes nocivos", "agentes_alegados"),
+        ("agentes físicos", "apr_fisicos"),
+        ("agentes químicos", "apr_quimicos"),
+        ("agentes biológicos", "apr_biologicos"),
+        ("enquadramento legal", "enquadramento_legal_prev"),
+        ("pedidos técnicos", "pedidos_tecnicos"),
+        ("preliminares periciais", "preliminares_periciais"),
+        ("defesa de mérito", "defesa_merito_sst"),
+        ("fase processual", "fase_processual"),
+        ("data da vistoria", "campo_data"),
+        ("horário", "campo_horario"),
+        ("local / endereço", "local_diligencia"),
+        ("ltcat", "doc_ltcat"),
+        ("laudo de insalubridade", "doc_laudo"),
+        ("ppp", "doc_ppp"),
+        ("pgr / ppra", "doc_pgr"),
+        ("ordens de serviço", "doc_os"),
+        ("asos / pcmsos", "doc_asos"),
+        ("outros documentos", "doc_outros"),
+        ("9.1. quesitos do juízo", "quesitos_juizo"),
+        ("quesitos do juízo", "quesitos_juizo"),
+        ("9.2. quesitos do reclamante", "quesitos_autor"),
+        ("quesitos do reclamante", "quesitos_autor"),
+        ("quesitos do autor", "quesitos_autor"),
+        ("9.3. quesitos da reclamada", "quesitos_reu"),
+        ("quesitos da reclamada", "quesitos_reu"),
+        ("quesitos da ré", "quesitos_reu")
+    ]
+    sorted_matchers = sorted(field_matchers, key=lambda x: len(x[0]), reverse=True)
+
+    current_key = None
+    current_buffer = []
+    last_entity = None
+
+    def clean_val(val):
+        return re.sub(r"_+", "", val).strip()
+
+    def save_current():
+        if current_key and current_buffer:
+            val = "\n".join(current_buffer).strip()
+            val = clean_val(val)
+            if val and "[informação" not in val.lower():
+                dados[current_key] = val
+
+    for linha in linhas_limpas:
+        # Troca de bloco numérico (Ex: "1. IDENTIFICAÇÃO")
+        if re.match(r'^\d+(\.\d*)*[\s\.\-]+[A-ZÀ-Ú]', linha) and ":" not in linha:
+            save_current()
+            current_key = None
+            current_buffer = []
+            continue
+
+        matched = False
+        if ":" in linha:
+            parts = linha.split(":", 1)
+            prefix = parts[0].strip().lower()
+            rest = parts[1].strip()
+
+            if "advogado" in prefix:
+                save_current()
+                val = clean_val(rest)
+                if last_entity == "reclamante": dados["reclamante_adv"] = val
+                elif last_entity == "reclamada": dados["reclamada_adv"] = val
+                else:
+                    if not dados.get("reclamante_adv"): dados["reclamante_adv"] = val
+                    else: dados["reclamada_adv"] = val
+                current_key = None
+                current_buffer = []
+                matched = True
+                continue
+
+            matched_key = None
+            # Tenta match exato ou por prefixo primeiro
+            for kw, d_key in sorted_matchers:
+                if prefix == kw or prefix.startswith(kw):
+                    matched_key = d_key
+                    break
+            # Fallback para match contido, ignorando campos vazios de acompanhante
+            if not matched_key:
+                for kw, d_key in sorted_matchers:
+                    if kw in prefix and "acompanhante" not in prefix:
+                        matched_key = d_key
+                        break
+
+            if matched_key:
+                save_current()
+                current_key = matched_key
+                rest_clean = clean_val(rest)
+                current_buffer = [rest_clean] if rest_clean else []
+                matched = True
+
+                # Lógicas inline (Ex: Nome (CPF: xxx))
+                if matched_key == "reclamante_nome":
+                    last_entity = "reclamante"
+                    if rest_clean:
+                        m_cpf = re.search(r"(?:CPF/NIT|CPF|NIT|PIS):\s*([\d\.\-\/]+)", rest_clean, re.IGNORECASE)
+                        if m_cpf:
+                            dados["reclamante_cpf"] = m_cpf.group(1).strip()
+                            current_buffer = [re.sub(r"\((?:CPF/NIT|CPF|NIT|PIS).*?\)", "", rest_clean, flags=re.IGNORECASE).strip()]
+                elif matched_key == "reclamada_nome":
+                    last_entity = "reclamada"
+                    if rest_clean:
+                        m_cnpj = re.search(r"CNPJ:\s*([\d\.\-\/]+)", rest_clean, re.IGNORECASE)
+                        if m_cnpj:
+                            dados["reclamada_cnpj"] = m_cnpj.group(1).strip()
+                            current_buffer = [re.sub(r"\(CNPJ:.*?\)", "", rest_clean, flags=re.IGNORECASE).strip()]
+
+        if not matched and current_key:
+            if linha:
+                current_buffer.append(linha)
+
+    save_current()
+
+    # Preenchimentos complementares
+    if not dados.get("reclamada_nome") and empresas_cnis:
+        dados["reclamada_nome"] = empresas_cnis[-1]
+        
+    if dados.get("profissao_cargo") and not dados.get("cargos"): dados["cargos"] = dados.get("profissao_cargo")
+    if dados.get("cargos") and not dados.get("profissao_cargo"): dados["profissao_cargo"] = dados.get("cargos")
+    
     return dados
 
 # --- FUNÇÕES DE BANCO DE DADOS EM NUVEM ---
@@ -799,7 +857,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### 📸 Captura de Evidências Fotográficas")
         
-        # Opção 1: Câmera Direta (Converte para Base64 para guardar na nuvem)
         img_camera = st.camera_input("📷 Tirar Foto Direta (Webcam / Câmera do Dispositivo)", key=f"cam_in_{processo_id_selecionado}")
         if img_camera is not None:
             file_bytes = img_camera.getvalue()
@@ -813,7 +870,6 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # Opção 2: Envio de Arquivos (Converte para Base64 para guardar na nuvem)
         col_up1, col_up2 = st.columns([3, 1])
         with col_up1: fotos_upload = st.file_uploader("📁 Ou Enviar Foto(s) da Galeria / Arquivos", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"up_gal_{processo_id_selecionado}")
         with col_up2:
