@@ -6,6 +6,8 @@ from docx.shared import Inches, Cm, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import parse_xml, OxmlElement
 from docx.oxml.ns import nsdecls, qn
+from docx.text.paragraph import Paragraph
+from docx.table import Table
 from PIL import Image
 import json
 import os
@@ -108,42 +110,41 @@ def calcula_altura(texto, min_h):
 def parse_pre_relatorio(doc):
     dados = {}
     linhas = []
-    
-    # 1. Puxa texto limpo de todos os parágrafos (Ignora formatação Word)
-    for p in doc.paragraphs:
-        if p.text.strip():
-            linhas.append(p.text.strip())
-            
     empresas_cnis = []
     epis_extraidos = []
     
-    # 2. Puxa texto de dentro de tabelas
-    for table in doc.tables:
-        if len(table.rows) > 0:
-            hdr = [cell.text.lower() for cell in table.rows[0].cells]
-            # Tabela de EPI
-            if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h for h in hdr):
-                for row in table.rows[1:]:
-                    cells = row.cells
-                    desc = cells[0].text.strip() if len(cells) > 0 else ""
-                    ca = cells[1].text.strip() if len(cells) > 1 else ""
-                    data = cells[2].text.strip() if len(cells) > 2 else ""
-                    obs = cells[3].text.strip() if len(cells) > 3 else ""
-                    desc = desc.replace("**", "").replace("*", "")
-                    if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
-                        epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
-            
-            # Tabela CNIS Extrajudicial
-            elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
-                for row in table.rows[1:]:
-                    if len(row.cells) >= 2:
-                        emp_text = row.cells[1].text.strip()
-                        if emp_text and "AGRUPAMENTO" not in emp_text.upper():
-                            empresas_cnis.append(emp_text)
+    # 1. Puxa texto limpo EM ORDEM (Intercala Parágrafos e Tabelas perfeitamente)
+    for element in doc.element.body:
+        if element.tag.endswith('p'):
+            p = Paragraph(element, doc._body)
+            if p.text.strip():
+                linhas.append(p.text.strip())
+        elif element.tag.endswith('tbl'):
+            table = Table(element, doc._body)
+            if len(table.rows) > 0:
+                hdr = [cell.text.lower() for cell in table.rows[0].cells]
+                # Tabela de EPI
+                if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h for h in hdr):
+                    for row in table.rows[1:]:
+                        cells = row.cells
+                        desc = cells[0].text.strip() if len(cells) > 0 else ""
+                        ca = cells[1].text.strip() if len(cells) > 1 else ""
+                        data = cells[2].text.strip() if len(cells) > 2 else ""
+                        obs = cells[3].text.strip() if len(cells) > 3 else ""
+                        desc = desc.replace("**", "").replace("*", "")
+                        if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
+                            epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
+                
+                # Tabela CNIS Extrajudicial
+                elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
+                    for row in table.rows[1:]:
+                        if len(row.cells) >= 2:
+                            emp_text = row.cells[1].text.strip()
+                            if emp_text and "AGRUPAMENTO" not in emp_text.upper():
+                                empresas_cnis.append(emp_text)
 
-            # Para Tabelas Invisíveis de Formatação
+            # Extrai o texto contido na tabela para ser lido normalmente pela Regex
             for row in table.rows:
-                # Usa ':' para unir colunas. Garante que a regex vai encontrar o separador.
                 row_text = " : ".join([c.text.strip() for c in row.cells if c.text.strip()])
                 if row_text:
                     linhas.append(row_text)
@@ -273,7 +274,6 @@ def parse_pre_relatorio(doc):
         
     dados["local_diligencia"] = get_single(r"Local / Endereço.*?")
 
-    # EXTRAÇÕES CORRIGIDAS PRIORIZANDO O TÍTULO MAIOR PRIMEIRO
     dados["doc_ltcat"] = get_multi(r"Análise do LTCAT|LTCAT", paradas)
     dados["doc_laudo"] = get_multi(r"Análise de Laudos.*?|LAUDO DE INSALUBRIDADE / PERICULOSIDADE \(Próprio ou Paradigma\)|LAUDO DE INSALUBRIDADE / PERICULOSIDADE|LAUDO DE INSALUBRIDADE", paradas)
     dados["doc_ppp"] = get_multi(r"Análise do PPP.*?|PPP \(Perfil Profissiográfico Previdenciário\)|PPP", paradas)
@@ -284,11 +284,11 @@ def parse_pre_relatorio(doc):
 
     dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs", paradas)
     
-    # EXTRAÇÃO DE QUESITOS (Aplicando stop_on_number=False para não quebrar nas perguntas 1., 1.1, etc)
-    paradas_quesitos = [r"\n9\.2", r"\n9\.3", r"\n10\.", r"\nPessoas Presentes"]
-    dados["quesitos_juizo"] = get_multi(r"9\.1\.\s*Quesitos do Juízo", paradas_quesitos, stop_on_number=False)
-    dados["quesitos_autor"] = get_multi(r"9\.2\.\s*Quesitos do Reclamante.*?", paradas_quesitos, stop_on_number=False)
-    dados["quesitos_reu"] = get_multi(r"9\.3\.\s*Quesitos da Reclamada.*?", paradas_quesitos, stop_on_number=False)
+    # EXTRAÇÃO DE QUESITOS (Aplicando stop_on_number=False e envelopando os nomes estendidos)
+    paradas_quesitos = [r"\n9\.2", r"\n9\.3", r"\n10\.", r"\nPessoas Presentes", r"\n10\. LEVANTAMENTOS DE CAMPO"]
+    dados["quesitos_juizo"] = get_multi(r"9\.1\.[\s]*Quesitos do Juízo", paradas_quesitos, stop_on_number=False)
+    dados["quesitos_autor"] = get_multi(r"9\.2\.[\s]*Quesitos do Reclamante(?:[\s]*\(Autor/Autora\))?", paradas_quesitos, stop_on_number=False)
+    dados["quesitos_reu"] = get_multi(r"9\.3\.[\s]*Quesitos da Reclamada(?:[\s]*\(Ré / Empresa\))?", paradas_quesitos, stop_on_number=False)
 
     return dados
 
