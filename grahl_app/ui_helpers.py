@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import streamlit as st
 
 from .utils import calcula_altura, format_missing_field_labels, safe_str
@@ -7,7 +9,7 @@ from .utils import calcula_altura, format_missing_field_labels, safe_str
 
 def initialize_session_state(defaults: dict[str, object]) -> None:
     for key, value in defaults.items():
-        st.session_state.setdefault(key, value.copy() if isinstance(value, dict) else value)
+        st.session_state.setdefault(key, copy.deepcopy(value) if isinstance(value, (dict, list, set)) else value)
 
 
 def render_case_header(process_id: str, process: dict) -> None:

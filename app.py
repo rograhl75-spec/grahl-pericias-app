@@ -261,7 +261,7 @@ if opcao == MENU_NEW:
             p_novo["reclamada_nome"] = p_empresa
             p_novo["processo_num"] = p_num
             try:
-                novo_id = create_process_with_auto_id(p_novo)
+                novo_id = create_process_with_auto_id(p_novo, existing_ids=db_processos.keys())
             except RuntimeError as exc:
                 st.error(str(exc))
             else:
@@ -269,7 +269,7 @@ if opcao == MENU_NEW:
                 st.session_state.uploader_key += 1
                 st.session_state.processo_ativo = novo_id
                 st.session_state.menu_opcao = MENU_DATA
-                show_save_feedback(f"✅ Caso {novo_id} criado com sucesso!", validate_process_data(p_novo).missing_required_fields)
+                show_save_feedback(f"✅ Caso {novo_id} criado com sucesso!", validate_process_data(p_novo, for_generation=True).missing_required_fields)
                 st.rerun()
 
 elif opcao == MENU_DATA:
