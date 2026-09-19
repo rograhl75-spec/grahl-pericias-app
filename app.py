@@ -141,7 +141,7 @@ def parse_pre_relatorio(doc):
                         if emp_text and "AGRUPAMENTO" not in emp_text.upper():
                             empresas_cnis.append(emp_text)
 
-            # Para Tabelas Invisíveis de Formatação (Ex: 1. IDENTIFICAÇÃO DO PROCESSO gerada pelo próprio App)
+            # Para Tabelas Invisíveis de Formatação
             for row in table.rows:
                 # Usa ':' para unir colunas. Garante que a regex vai encontrar o separador.
                 row_text = " : ".join([c.text.strip() for c in row.cells if c.text.strip()])
@@ -164,9 +164,13 @@ def parse_pre_relatorio(doc):
                 return v
         return ""
 
-    def get_multi(padrao, next_sections):
-        # Extrai blocos multilinhas (Ex: Quesitos) blindando onde ele deve parar de ler
-        lookahead = r"(?=\n\d+\.\s*|(?:" + "|".join(next_sections) + r")|$)"
+    def get_multi(padrao, next_sections, stop_on_number=True):
+        # Desabilita a trava numérica (1., 2.) quando estivermos lendo os Quesitos
+        if stop_on_number:
+            lookahead = r"(?=\n\d+\.\s*|(?:" + "|".join(next_sections) + r")|$)"
+        else:
+            lookahead = r"(?=(?:" + "|".join(next_sections) + r")|$)"
+            
         m = re.search(r"(?:" + padrao + r")[\s]*[:|]?[\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
         if m:
             v = m.group(1).replace("_", "").strip()
@@ -225,8 +229,22 @@ def parse_pre_relatorio(doc):
     dados["ultima_remuneracao"] = get_single(r"Última Remuneração.*?")
     dados["objeto_pericia"] = get_single(r"Objeto da Perícia|Objeto de Análise / Perícia|Objetivo")
 
-    # BLOCOS MULTILINHAS (Sínteses e Documentos)
-    paradas = [r"Agentes Nocivos", r"Agentes Físicos", r"Pedidos Técnicos", r"Preliminares Periciais", r"Defesa de Mérito", r"Fase Processual", r"Data da Vistoria", r"Local / Endereço", r"Análise do LTCAT", r"Laudo de Insalubridade", r"Análise do PPP", r"Análise do PGR", r"Ordens de Serviço", r"ASOs / PCMSO", r"Outros Documentos", r"Síntese e Análise", r"9\.1", r"9\.2", r"9\.3", r"Pessoas Presentes", r"Informações prestadas", r"Medições Realizadas"]
+    # LISTA ATUALIZADA COM OS TÍTULOS EXATOS DO DOCUMENTO
+    paradas = [
+        r"Agentes Nocivos", r"Agentes Físicos", r"Agentes Químicos", r"Agentes Biológicos",
+        r"Pedidos Técnicos", r"Preliminares Periciais", r"Defesa de Mérito", 
+        r"Fase Processual", r"Data da Vistoria", r"Local / Endereço", 
+        r"Análise do LTCAT", r"LTCAT", 
+        r"Laudo de Insalubridade", r"LAUDO DE INSALUBRIDADE.*?|LAUDO DE INSALUBRIDADE / PERICULOSIDADE.*?", 
+        r"Análise do PPP", r"PPP \(Perfil Profissiográfico Previdenciário\)", r"PPP", 
+        r"Análise do PGR", r"PGR / PPRA / PCMAT", r"PGR / PPRA", r"PGR", 
+        r"Ordens de Serviço", r"ORDENS DE SERVIÇO \(OS\) / TREINAMENTOS", r"ORDENS DE SERVIÇO", 
+        r"ASOs / PCMSO", r"ASOs", 
+        r"Outros Documentos Relevantes", r"Outros Documentos", 
+        r"Síntese e Análise Crítica de EPIs", r"Síntese e Análise", 
+        r"9\.1", r"9\.2", r"9\.3", r"10\.", 
+        r"Pessoas Presentes", r"Informações prestadas", r"Medições Realizadas"
+    ]
     
     dados["atividades_inicial"] = get_multi(r"Atividades Descritas.*?|Atividades Típicas.*?|Relato das Atividades.*?|Relato Inicial.*?", paradas)
     if not dados.get("relato_inicial"): dados["relato_inicial"] = dados.get("atividades_inicial", "")
@@ -255,21 +273,22 @@ def parse_pre_relatorio(doc):
         
     dados["local_diligencia"] = get_single(r"Local / Endereço.*?")
 
+    # EXTRAÇÕES CORRIGIDAS PRIORIZANDO O TÍTULO MAIOR PRIMEIRO
     dados["doc_ltcat"] = get_multi(r"Análise do LTCAT|LTCAT", paradas)
-    dados["doc_laudo"] = get_multi(r"Análise de Laudos.*?|LAUDO DE INSALUBRIDADE.*?", paradas)
-    dados["doc_ppp"] = get_multi(r"Análise do PPP.*?|PPP.*?", paradas)
-    dados["doc_pgr"] = get_multi(r"Análise do PGR.*?|PGR / PPRA.*?", paradas)
-    dados["doc_os"] = get_multi(r"Ordens de Serviço.*?|ORDENS DE SERVIÇO.*?", paradas)
-    dados["doc_asos"] = get_multi(r"ASOs / PCMSO.*?|ASOs / PCMSO", paradas)
-    dados["doc_outros"] = get_multi(r"Outros Documentos.*?", paradas)
+    dados["doc_laudo"] = get_multi(r"Análise de Laudos.*?|LAUDO DE INSALUBRIDADE / PERICULOSIDADE \(Próprio ou Paradigma\)|LAUDO DE INSALUBRIDADE / PERICULOSIDADE|LAUDO DE INSALUBRIDADE", paradas)
+    dados["doc_ppp"] = get_multi(r"Análise do PPP.*?|PPP \(Perfil Profissiográfico Previdenciário\)|PPP", paradas)
+    dados["doc_pgr"] = get_multi(r"Análise do PGR.*?|PGR / PPRA / PCMAT|PGR / PPRA|PGR", paradas)
+    dados["doc_os"] = get_multi(r"Ordens de Serviço.*?|ORDENS DE SERVIÇO \(OS\) / TREINAMENTOS|ORDENS DE SERVIÇO", paradas)
+    dados["doc_asos"] = get_multi(r"ASOs / PCMSO|ASOs", paradas)
+    dados["doc_outros"] = get_multi(r"Outros Documentos Relevantes|Outros Documentos", paradas)
 
     dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs", paradas)
     
-    # EXTRAÇÃO DE QUESITOS (Blindada contra números de parágrafos)
+    # EXTRAÇÃO DE QUESITOS (Aplicando stop_on_number=False para não quebrar nas perguntas 1., 1.1, etc)
     paradas_quesitos = [r"\n9\.2", r"\n9\.3", r"\n10\.", r"\nPessoas Presentes"]
-    dados["quesitos_juizo"] = get_multi(r"9\.1\.\s*Quesitos do Juízo", paradas_quesitos)
-    dados["quesitos_autor"] = get_multi(r"9\.2\.\s*Quesitos do Reclamante.*?", paradas_quesitos)
-    dados["quesitos_reu"] = get_multi(r"9\.3\.\s*Quesitos da Reclamada.*?", paradas_quesitos)
+    dados["quesitos_juizo"] = get_multi(r"9\.1\.\s*Quesitos do Juízo", paradas_quesitos, stop_on_number=False)
+    dados["quesitos_autor"] = get_multi(r"9\.2\.\s*Quesitos do Reclamante.*?", paradas_quesitos, stop_on_number=False)
+    dados["quesitos_reu"] = get_multi(r"9\.3\.\s*Quesitos da Reclamada.*?", paradas_quesitos, stop_on_number=False)
 
     return dados
 
@@ -459,6 +478,16 @@ if opcao == "➕ Novo Processo / Caso":
             doc_ext = Document(arquivo_importado)
             dados_extraidos = parse_pre_relatorio(doc_ext)
             st.session_state.parsed_data = dados_extraidos
+            
+            # INJEÇÃO DIRETA NO ESTADO: Evita que o Streamlit ofusque o valor recém extraído
+            key_num = f"novo_num_{st.session_state.uploader_key}"
+            key_nome = f"novo_nome_{st.session_state.uploader_key}"
+            key_emp = f"novo_emp_{st.session_state.uploader_key}"
+            
+            st.session_state[key_num] = dados_extraidos.get("processo_num", "") or ""
+            st.session_state[key_nome] = dados_extraidos.get("reclamante_nome", "") or ""
+            st.session_state[key_emp] = dados_extraidos.get("reclamada_nome", "") or ""
+            
             st.success("Documento lido e mapeado com sucesso!")
         except Exception as e:
             st.error(f"Erro ao ler o arquivo: {e}")
