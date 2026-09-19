@@ -11,55 +11,59 @@ import json
 import os
 import io
 import re
-import hashlib
+import base64
 import unicodedata
 from datetime import datetime
 
-DB_FILE = "processos_db.json"
-LOGO_FILE = "logo dourado grahl consultoria.png"
-FOTOS_DIR = os.path.abspath("fotos_uploads")
+# --- CONFIGURAÇÃO FIREBASE NUVEM ---
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-os.makedirs(FOTOS_DIR, exist_ok=True)
+if not firebase_admin._apps:
+    try:
+        cred_dict = dict(st.secrets["firebase"])
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+    except Exception as e:
+        st.error("Erro ao conectar no Firebase. Verifique o st.secrets.")
+
+db = firestore.client()
+# -----------------------------------
+
+LOGO_FILE = "logo dourado grahl consultoria.png"
 
 dados_padrao = {
     "modulo_atuacao": "Perícia Judicial Trabalhista",
     "tipos_pericia": ["Insalubridade (NR-15)", "Aposentadoria Especial (PPP/LTCAT)"],
     "papel_profissional": "Assistente Técnico da Reclamada",
-
     "processo_num": "",
     "orgao_julgador": "Vara do Trabalho de Londrina - PR",
     "data_autuacao": datetime.now().strftime("%d/%m/%Y"),
     "valor_causa": "",
     "rito_processual": "Ordinário / Sumaríssimo",
-    
     "reclamante_nome": "",
     "reclamante_cpf": "",
     "reclamante_adv": "",
     "reclamada_nome": "",
     "reclamada_cnpj": "",
     "reclamada_adv": "",
-
     "data_admissao": "",
     "status_contrato": "Ativo",
     "periodo_imprescrito": "",
     "cargos": "",
     "setor": "",
     "ultima_remuneracao": "",
-
     "objeto_pericia": "Insalubridade, Periculosidade e/ou Aposentadoria Especial",
     "atividades_inicial": "",
     "agentes_alegados": "",
     "pedidos_tecnicos": "",
-
     "preliminares_periciais": "",
     "defesa_merito_sst": "",
-
     "fase_processual": "Aguardando diligência pericial",
     "campo_data": datetime.now().strftime("%d/%m/%Y"),
     "campo_horario": "14:00",
     "local_diligencia": "",
     "presentes_pericia": "",
-
     "doc_ltcat": "",
     "doc_laudo": "",
     "doc_ppp": "",
@@ -67,14 +71,11 @@ dados_padrao = {
     "doc_os": "",
     "doc_asos": "",
     "doc_outros": "",
-
     "quadro_epis": [], 
     "analise_epis_critica": "",
-
     "quesitos_juizo": "",
     "quesitos_autor": "",
     "quesitos_reu": "",
-
     "segurado_nascimento": "",
     "profissao_cargo": "",
     "relato_inicial": "",
@@ -86,7 +87,6 @@ dados_padrao = {
     "extemp_maquinas": False,
     "extemp_epc": False,
     "extemp_justificativa": "As condições ambientais, layout e tecnologias mantêm-se inalteradas em relação ao período pretendido (Art. 279, IN 128/2022).",
-
     "campo_declaracoes_autor": "",
     "campo_declaracoes_reu": "",
     "campo_medicoes": "",
@@ -99,17 +99,14 @@ def remover_acentos(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
 
 def calcula_altura(texto, min_h):
-    if not texto: 
-        return min_h
+    if not texto: return min_h
     texto_str = str(texto)
     linhas_quebradas = texto_str.count('\n') + 1
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
-    calc = (linhas_quebradas + caracteres_extras_wrap) * 24 + 40
-    return max(min_h, calc)
+    return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
 def parse_pre_relatorio(doc):
     dados = {}
-    
     linhas = []
     for p in doc.paragraphs:
         linhas.append(p.text)
@@ -168,8 +165,7 @@ def parse_pre_relatorio(doc):
         m_tbl = re.findall(r"\d{2}/\d{2}/\d{4}.*?\|\s*([^\|]+)\s*\|", texto)
         if m_tbl:
             v = clean_val(m_tbl[-1]) 
-            if v:
-                dados["reclamada_nome"] = v
+            if v: dados["reclamada_nome"] = v
 
     m_cnpj = re.findall(r"CNPJ:\s*([\d\.\-\/]+)", texto, re.IGNORECASE)
     for m in m_cnpj:
@@ -234,50 +230,46 @@ def parse_pre_relatorio(doc):
                     ca = cells[1].text.strip() if len(cells) > 1 else ""
                     data = cells[2].text.strip() if len(cells) > 2 else ""
                     obs = cells[3].text.strip() if len(cells) > 3 else ""
-                    
                     desc = desc.replace("**", "").replace("*", "")
                     if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
-                        epis_extraidos.append({
-                            "descricao": desc,
-                            "ca": ca,
-                            "data_entrega": data,
-                            "obs": obs
-                        })
+                        epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
                 break
 
     if epis_extraidos:
         dados["quadro_epis"] = epis_extraidos
-
     return dados
 
+# --- FUNÇÕES DE BANCO DE DADOS EM NUVEM ---
 def carregar_dados():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            try:
-                dados = json.load(f)
-                dados_padronizados = {}
-                for k, v in dados.items():
-                    novo_k = k
-                    if k.startswith("Processo_") or k.startswith("Extra_"):
-                        num = re.findall(r'\d+', k)
-                        if num:
-                            novo_k = f"Proc_{int(num[0]):02d}"
-                    for k_padrao, v_padrao in dados_padrao.items():
-                        if k_padrao not in v:
-                            v[k_padrao] = v_padrao
-                    dados_padronizados[novo_k] = v
-                return dados_padronizados
-            except:
-                return {}
-    return {}
+    try:
+        docs = db.collection('processos').stream()
+        dados_db = {}
+        for doc in docs:
+            v = doc.to_dict()
+            k = doc.id
+            for k_padrao, v_padrao in dados_padrao.items():
+                if k_padrao not in v:
+                    v[k_padrao] = v_padrao
+            dados_db[k] = v
+        return dados_db
+    except:
+        return {}
 
-def salvar_dados(dados):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(dados, f, ensure_ascii=False, indent=4)
+def salvar_processo(id_proc, dados_proc):
+    try:
+        db.collection('processos').document(id_proc).set(dados_proc)
+    except Exception as e:
+        st.error(f"Erro ao salvar na nuvem: {e}")
 
-def gerar_proximo_id(db):
+def excluir_processo(id_proc):
+    try:
+        db.collection('processos').document(id_proc).delete()
+    except Exception as e:
+        st.error(f"Erro ao excluir na nuvem: {e}")
+
+def gerar_proximo_id(db_local):
     numeros = []
-    for k in db.keys():
+    for k in db_local.keys():
         if k.startswith("Proc_"):
             try:
                 num = int(k.split("_")[1])
@@ -290,19 +282,12 @@ def gerar_proximo_id(db):
 icon_config = LOGO_FILE if os.path.exists(LOGO_FILE) else "🛡️"
 st.set_page_config(page_title="Grahl Consultoria - Perícias e Laudos Previdenciários", page_icon=icon_config, layout="wide")
 
-# Inicialização de Variáveis de Estado Nativas do Streamlit
-if "processo_ativo" not in st.session_state:
-    st.session_state.processo_ativo = None
-if "menu_opcao" not in st.session_state:
-    st.session_state.menu_opcao = "➕ Novo Processo / Caso"
-if "parsed_data" not in st.session_state:
-    st.session_state.parsed_data = {}
-if "gps_field_main" not in st.session_state:
-    st.session_state.gps_field_main = ""
-if "confirmar_exclusao_dupla" not in st.session_state:
-    st.session_state.confirmar_exclusao_dupla = False
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0  # Controle para esvaziar o uploader
+if "processo_ativo" not in st.session_state: st.session_state.processo_ativo = None
+if "menu_opcao" not in st.session_state: st.session_state.menu_opcao = "➕ Novo Processo / Caso"
+if "parsed_data" not in st.session_state: st.session_state.parsed_data = {}
+if "gps_field_main" not in st.session_state: st.session_state.gps_field_main = ""
+if "confirmar_exclusao_dupla" not in st.session_state: st.session_state.confirmar_exclusao_dupla = False
+if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
 
 st.markdown("""
     <style>
@@ -310,7 +295,6 @@ st.markdown("""
     section[data-testid="stSidebar"] { background-color: #1B365D; padding-top: 1.5rem; }
     section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3, section[data-testid="stSidebar"] label { color: #FFFFFF !important; }
     section[data-testid="stSidebar"] .stSelectbox label p { color: #E2E8F0 !important; font-size: 16px !important; font-weight: 600 !important; }
-    
     section[data-testid="stSidebar"] .stButton button {
         width: 100% !important; border-radius: 12px !important; padding: 14px 18px !important;
         font-size: 15px !important; font-weight: 700 !important; color: white !important;
@@ -323,14 +307,12 @@ st.markdown("""
     section[data-testid="stSidebar"] .stButton:nth-of-type(4) button { background-color: #DC2626 !important; }
     section[data-testid="stSidebar"] .stButton:nth-of-type(5) button { background-color: #9333EA !important; }
     section[data-testid="stSidebar"] .stButton button:hover { filter: brightness(1.15) !important; transform: translateY(-2px); }
-    
     div.block-container { padding-top: 2rem; }
     h1 { color: #1B365D !important; font-weight: 800 !important; letter-spacing: -0.5px; }
     h2, h3 { color: #1B365D !important; font-weight: 700 !important; }
     label, .stTextInput label, .stTextArea label, .stSelectbox label, .stFileUploader label { color: #1B365D !important; font-weight: 700 !important; font-size: 15px !important; }
     input, textarea { background-color: #FFFFFF !important; border: 1px solid #CBD5E1 !important; border-radius: 8px !important; font-size: 16px !important; }
     textarea { field-sizing: content !important; }
-    
     .stButton button {
         background-color: #1B365D !important; color: white !important; font-weight: 700 !important;
         border-radius: 8px !important; padding: 0.5rem 1.2rem; border: none;
@@ -348,18 +330,9 @@ db_processos = carregar_dados()
 col_logo, col_titulo = st.columns([1, 6])
 with col_logo:
     logo_encontrado = None
-    if os.path.exists(LOGO_FILE):
-        logo_encontrado = LOGO_FILE
-    else:
-        for f in os.listdir("."):
-            if "logo" in f.lower() and f.lower().endswith((".jpg", ".png", ".jpeg")):
-                logo_encontrado = f
-                break
-    if logo_encontrado:
-        st.image(logo_encontrado, width=140)
-    else:
-        st.markdown("### 🛡️ **GRAHL**")
-        st.caption("Engenharia e Perícias")
+    if os.path.exists(LOGO_FILE): logo_encontrado = LOGO_FILE
+    if logo_encontrado: st.image(logo_encontrado, width=140)
+    else: st.markdown("### 🛡️ **GRAHL**")
 
 with col_titulo:
     st.markdown("<h1 style='margin:0; font-size: 1.7rem;'>Gestão Pericial Trabalhista & Laudos Previdenciários</h1>", unsafe_allow_html=True)
@@ -367,19 +340,11 @@ with col_titulo:
 
 st.markdown("<hr style='margin-top: 1rem; margin-bottom: 1.5rem; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
 
-def trocar_menu(acao):
-    st.session_state.menu_opcao = acao
+def trocar_menu(acao): st.session_state.menu_opcao = acao
 
 st.sidebar.markdown("<h2 style='color: #FFFFFF; font-size: 1.3rem; margin-bottom: 1rem;'>📁 Painel de Controle</h2>", unsafe_allow_html=True)
-acoes_menu = [
-    "➕ Novo Processo / Caso", 
-    "✏️ Dados, Escritório & SST", 
-    "🚜 Diligência de Campo & Fotos", 
-    "🗑️ Excluir Processo", 
-    "📄 Gerar Documento Word Final"
-]
-for acao in acoes_menu:
-    st.sidebar.button(acao, on_click=trocar_menu, args=(acao,), use_container_width=True)
+acoes_menu = ["➕ Novo Processo / Caso", "✏️ Dados, Escritório & SST", "🚜 Diligência de Campo & Fotos", "🗑️ Excluir Processo", "📄 Gerar Documento Word Final"]
+for acao in acoes_menu: st.sidebar.button(acao, on_click=trocar_menu, args=(acao,), use_container_width=True)
 
 opcao = st.session_state.menu_opcao
 
@@ -432,20 +397,11 @@ if processos_filtrados:
         st.session_state.processo_ativo = novo_id
         st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
 
-    st.sidebar.selectbox(
-        "Processo / Caso Selecionado:",
-        options=lista_chaves,
-        index=idx_selecionado,
-        key="caixa_pesquisa",
-        on_change=atualizar_processo
-    )
-    
+    st.sidebar.selectbox("Processo / Caso Selecionado:", options=lista_chaves, index=idx_selecionado, key="caixa_pesquisa", on_change=atualizar_processo)
     processo_id_selecionado = st.session_state.processo_ativo
 else:
     st.sidebar.warning("⚠️ Nenhum caso encontrado.")
     processo_id_selecionado = "Nenhum caso cadastrado"
-
-# =============== TELAS ===============
 
 if opcao == "➕ Novo Processo / Caso":
     st.markdown("### Cadastrar Novo Caso ou Processo")
@@ -462,8 +418,6 @@ if opcao == "➕ Novo Processo / Caso":
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📥 Importar Documento Base (.docx)")
-    
-    # Uploader com chave dinâmica para esvaziar ao criar o processo
     arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
     
     if arquivo_importado is not None:
@@ -478,7 +432,6 @@ if opcao == "➕ Novo Processo / Caso":
     st.markdown("<br>", unsafe_allow_html=True)
     with st.form("form_novo"):
         parsed = st.session_state.get("parsed_data", {})
-        
         if is_prev_mod:
             lbl_num = "Identificação / Protocolo ou NIT/CPF"
             lbl_nome = "Nome do Segurado"
@@ -499,9 +452,7 @@ if opcao == "➕ Novo Processo / Caso":
             p_novo = dados_padrao.copy()
             if parsed:
                 for k, v in parsed.items():
-                    if v:
-                        p_novo[k] = v
-            
+                    if v: p_novo[k] = v
             if is_prev_mod:
                 p_novo["modulo_atuacao"] = "Laudo Extrajudicial Previdenciário (LTCAT+PPP)"
                 p_novo["reclamante_nome"] = p_nome
@@ -513,14 +464,9 @@ if opcao == "➕ Novo Processo / Caso":
                 p_novo["reclamada_nome"] = p_empresa
                 p_novo["processo_num"] = p_num
             
-            db_processos[proximo_id] = p_novo
-            salvar_dados(db_processos)
-            
-            # Zera a memória do upload e incrementa a chave para apagar o form visualmente
+            salvar_processo(proximo_id, p_novo)
             st.session_state.parsed_data = {}
             st.session_state.uploader_key += 1
-            
-            # Roteamento automático para a tela de edição
             st.session_state.processo_ativo = proximo_id
             st.session_state.last_proc = proximo_id
             st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
@@ -533,12 +479,10 @@ elif opcao == "✏️ Dados, Escritório & SST":
     else:
         p_atual = db_processos[processo_id_selecionado]
         is_prev = "Previdenciário" in p_atual.get("modulo_atuacao", "")
-        
         st.markdown(f"<div style='background-color: #E2E8F0; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px;'><b style='color: #1B365D;'>Caso Ativo:</b> {processo_id_selecionado} &nbsp;|&nbsp; <b style='color: #1B365D;'>Módulo:</b> {p_atual.get('modulo_atuacao', '')}</div>", unsafe_allow_html=True)
         
         if is_prev:
             tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Segurado & Tomador", "2️⃣ APR-HO & Extemporaneidade", "3️⃣ Planilha de EPIs", "4️⃣ Metodologia & Enquadramento"])
-            
             with tab1:
                 st.markdown("### 1. Identificação do Segurado e da Empresa")
                 with st.form(f"fp_1_{processo_id_selecionado}"):
@@ -559,8 +503,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["relato_inicial"] = st.text_area("Relato Inicial / Atividades Desenvolvidas pelo Segurado", value=val_relato, height=calcula_altura(val_relato, 120), key=f"p1_ri_{processo_id_selecionado}")
                     
                     if st.form_submit_button("💾 Salvar Dados do Segurado"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Dados do Segurado salvos!", icon="💾")
 
             with tab2:
@@ -582,15 +525,13 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["extemp_justificativa"] = st.text_area("Fundamentação Técnica da Equivalência (Extemporaneidade)", value=v_ext, height=calcula_altura(v_ext, 100), key=f"p2_ej_{processo_id_selecionado}")
 
                     if st.form_submit_button("💾 Salvar APR e Extemporaneidade"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ APR salva com sucesso!", icon="💾")
 
             with tab3:
                 st.markdown("### 3. Planilha de EPIs & Eficácia (Tema 555 STF)")
                 epis_atuais = p_atual.get("quadro_epis", [])
                 df_epis = pd.DataFrame(epis_atuais, columns=["descricao", "ca", "data_entrega", "obs"])
-                
                 edited_df = st.data_editor(
                     df_epis,
                     column_config={
@@ -599,18 +540,14 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         "data_entrega": st.column_config.TextColumn("Periodicidade / Entrega", width="medium"),
                         "obs": st.column_config.TextColumn("Eficácia / Higienização / Tema 555", width="large"),
                     },
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    height=300,
-                    key=f"ed_pe_{processo_id_selecionado}"
+                    num_rows="dynamic", use_container_width=True, height=300, key=f"ed_pe_{processo_id_selecionado}"
                 )
 
                 if st.button("💾 Salvar Tabela de EPIs Previdenciários", key=f"btn_pe_{processo_id_selecionado}"):
                     df_clean = edited_df.fillna("")
                     df_clean = df_clean[df_clean["descricao"].astype(str).str.strip() != ""]
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
-                    db_processos[processo_id_selecionado] = p_atual
-                    salvar_dados(db_processos)
+                    salvar_processo(processo_id_selecionado, p_atual)
                     st.toast("✅ Planilha de EPIs salva!", icon="💾")
 
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -618,8 +555,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     v_epi = p_atual.get("analise_epis_critica", "")
                     p_atual["analise_epis_critica"] = st.text_area("Análise Crítica da Eficácia dos EPIs (Tema 555 STF / Súmula 9 TNU)", value=v_epi, height=calcula_altura(v_epi, 120), key=f"p3_aec_{processo_id_selecionado}")
                     if st.form_submit_button("💾 Salvar Análise Crítica"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Análise Crítica salva!", icon="💾")
 
             with tab4:
@@ -630,19 +566,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação Ambiental (Ex: Ruído NHO-01, q=5, NEN, Critérios Químicos LINACH)", value=v_met, height=calcula_altura(v_met, 150), key=f"p4_dl_{processo_id_selecionado}")
                     
                     if st.form_submit_button("💾 Salvar Metodologia"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Metodologia salva!", icon="💾")
 
         else:
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "1️⃣ Identificação & Partes", 
-                "2️⃣ Contrato & Sínteses", 
-                "3️⃣ SST & Documentos", 
-                "4️⃣ Planilha de EPIs", 
-                "5️⃣ Quesitos Literais"
-            ])
-            
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["1️⃣ Identificação & Partes", "2️⃣ Contrato & Sínteses", "3️⃣ SST & Documentos", "4️⃣ Planilha de EPIs", "5️⃣ Quesitos Literais"])
             with tab1:
                 st.markdown("### 1. Papel Profissional, Tipos de Perícia & Identificação")
                 with st.form(f"ft_1_{processo_id_selecionado}"):
@@ -671,8 +599,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Papel, Identificação e Partes"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Identificação salva!", icon="💾")
 
             with tab2:
@@ -690,74 +617,55 @@ elif opcao == "✏️ Dados, Escritório & SST":
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     p_atual["objeto_pericia"] = st.text_input("Objeto de Análise / Perícia", value=p_atual.get("objeto_pericia", ""), key=f"s2_op_{processo_id_selecionado}")
-                    
                     v_ati = p_atual.get("atividades_inicial", "")
                     p_atual["atividades_inicial"] = st.text_area("Atividades Descritas na Inicial", value=v_ati, height=calcula_altura(v_ati, 100), key=f"s2_ai_{processo_id_selecionado}")
-                    
                     v_age = p_atual.get("agentes_alegados", "")
                     p_atual["agentes_alegados"] = st.text_area("Agentes Nocivos / Riscos Alegados", value=v_age, height=calcula_altura(v_age, 100), key=f"s2_aa_{processo_id_selecionado}")
-                    
                     v_ped = p_atual.get("pedidos_tecnicos", "")
                     p_atual["pedidos_tecnicos"] = st.text_area("Pedidos Técnicos (Grau, Enquadramento, PPP)", value=v_ped, height=calcula_altura(v_ped, 100), key=f"s2_pt_{processo_id_selecionado}")
-                    
                     v_pre = p_atual.get("preliminares_periciais", "")
                     p_atual["preliminares_periciais"] = st.text_area("Preliminares Periciais (Contestação)", value=v_pre, height=calcula_altura(v_pre, 100), key=f"s2_pp_{processo_id_selecionado}")
-                    
                     v_def = p_atual.get("defesa_merito_sst", "")
                     p_atual["defesa_merito_sst"] = st.text_area("Defesa de Mérito SST (Contestação)", value=v_def, height=calcula_altura(v_def, 120), key=f"s2_dm_{processo_id_selecionado}")
 
-                    st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Contrato e Sínteses"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Contrato e Sínteses salvos!", icon="💾")
 
             with tab3:
                 st.markdown("### 6. Vistoria & 7. Análise de Documentos de SST")
                 with st.form(f"ft_3_{processo_id_selecionado}"):
                     col5, col6, col7 = st.columns(3)
-                    with col5:
-                        p_atual["fase_processual"] = st.text_input("Fase Processual Atual", value=p_atual.get("fase_processual", ""), key=f"s3_fp_{processo_id_selecionado}")
-                    with col6:
-                        p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"s3_cd_{processo_id_selecionado}")
-                    with col7:
-                        p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"s3_ch_{processo_id_selecionado}")
+                    with col5: p_atual["fase_processual"] = st.text_input("Fase Processual Atual", value=p_atual.get("fase_processual", ""), key=f"s3_fp_{processo_id_selecionado}")
+                    with col6: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"s3_cd_{processo_id_selecionado}")
+                    with col7: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"s3_ch_{processo_id_selecionado}")
                     
                     p_atual["local_diligencia"] = st.text_input("Local / Endereço da Diligência", value=p_atual.get("local_diligencia", ""), key=f"s3_ld_{processo_id_selecionado}")
-
                     st.markdown("<br>", unsafe_allow_html=True)
+                    
                     v_ltc = p_atual.get("doc_ltcat", "")
                     p_atual["doc_ltcat"] = st.text_area("Análise do LTCAT", value=v_ltc, height=calcula_altura(v_ltc, 90), key=f"s3_dl_{processo_id_selecionado}")
-                    
                     v_lau = p_atual.get("doc_laudo", "")
                     p_atual["doc_laudo"] = st.text_area("Análise de Laudos Prévios / Paradigmas", value=v_lau, height=calcula_altura(v_lau, 90), key=f"s3_dlau_{processo_id_selecionado}")
-                    
                     v_ppp = p_atual.get("doc_ppp", "")
                     p_atual["doc_ppp"] = st.text_area("Análise do PPP (Agentes, Responsáveis, EPI)", value=v_ppp, height=calcula_altura(v_ppp, 90), key=f"s3_dppp_{processo_id_selecionado}")
-                    
                     v_pgr = p_atual.get("doc_pgr", "")
                     p_atual["doc_pgr"] = st.text_area("Análise do PGR / PPRA / PCMAT", value=v_pgr, height=calcula_altura(v_pgr, 90), key=f"s3_dpgr_{processo_id_selecionado}")
-                    
                     v_dos = p_atual.get("doc_os", "")
                     p_atual["doc_os"] = st.text_area("Ordens de Serviço e Treinamentos", value=v_dos, height=calcula_altura(v_dos, 90), key=f"s3_dos_{processo_id_selecionado}")
-                    
                     v_aso = p_atual.get("doc_asos", "")
                     p_atual["doc_asos"] = st.text_area("ASOs / PCMSO (Aptidão e Riscos)", value=v_aso, height=calcula_altura(v_aso, 90), key=f"s3_daso_{processo_id_selecionado}")
-                    
                     v_out = p_atual.get("doc_outros", "")
                     p_atual["doc_outros"] = st.text_area("Outros Documentos Relevantes (FISPQs, etc.)", value=v_out, height=calcula_altura(v_out, 90), key=f"s3_dout_{processo_id_selecionado}")
 
-                    st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Vistoria e Documentos SST"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Análises de Documentos salvas!", icon="💾")
 
             with tab4:
                 st.markdown("### 8. Quadro de Fornecimento de EPIs & Análise Crítica")
                 epis_atuais = p_atual.get("quadro_epis", [])
                 df_epis = pd.DataFrame(epis_atuais, columns=["descricao", "ca", "data_entrega", "obs"])
-                
                 edited_df = st.data_editor(
                     df_epis,
                     column_config={
@@ -766,28 +674,22 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         "data_entrega": st.column_config.TextColumn("Data Entrega", width="medium"),
                         "obs": st.column_config.TextColumn("Observações", width="large"),
                     },
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    height=350,
-                    key=f"ed_et_{processo_id_selecionado}"
+                    num_rows="dynamic", use_container_width=True, height=350, key=f"ed_et_{processo_id_selecionado}"
                 )
 
                 if st.button("💾 Salvar Tabela de EPIs", key=f"btn_st_{processo_id_selecionado}"):
                     df_clean = edited_df.fillna("")
                     df_clean = df_clean[df_clean["descricao"].astype(str).str.strip() != ""]
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
-                    db_processos[processo_id_selecionado] = p_atual
-                    salvar_dados(db_processos)
+                    salvar_processo(processo_id_selecionado, p_atual)
                     st.toast("✅ Quadro de EPIs salvo!", icon="💾")
 
                 st.markdown("<br>---<br>", unsafe_allow_html=True)
-
                 with st.form(f"ft_4_epi_{processo_id_selecionado}"):
                     v_epi2 = p_atual.get("analise_epis_critica", "")
                     p_atual["analise_epis_critica"] = st.text_area("Síntese e Análise Crítica de EPIs", value=v_epi2, height=calcula_altura(v_epi2, 180), key=f"s4_aec_{processo_id_selecionado}")
                     if st.form_submit_button("💾 Salvar Análise Crítica de EPIs"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Análise Crítica salva!", icon="💾")
 
             with tab5:
@@ -795,17 +697,13 @@ elif opcao == "✏️ Dados, Escritório & SST":
                 with st.form(f"ft_5_{processo_id_selecionado}"):
                     v_q1 = p_atual.get("quesitos_juizo", "")
                     p_atual["quesitos_juizo"] = st.text_area("9.1. Quesitos do Juízo", value=v_q1, height=calcula_altura(v_q1, 150), key=f"s5_qj_{processo_id_selecionado}")
-                    
                     v_q2 = p_atual.get("quesitos_autor", "")
                     p_atual["quesitos_autor"] = st.text_area("9.2. Quesitos do Reclamante (Autor/Autora)", value=v_q2, height=calcula_altura(v_q2, 250), key=f"s5_qa_{processo_id_selecionado}")
-                    
                     v_q3 = p_atual.get("quesitos_reu", "")
                     p_atual["quesitos_reu"] = st.text_area("9.3. Quesitos da Reclamada (Ré / Empresa)", value=v_q3, height=calcula_altura(v_q3, 250), key=f"s5_qr_{processo_id_selecionado}")
 
-                    st.markdown("<br>", unsafe_allow_html=True)
                     if st.form_submit_button("💾 Salvar Quesitos Literais"):
-                        db_processos[processo_id_selecionado] = p_atual
-                        salvar_dados(db_processos)
+                        salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Quesitos salvos!", icon="💾")
 
 elif opcao == "🚜 Diligência de Campo & Fotos":
@@ -818,35 +716,27 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("### 🚜 Vistoria Pericial de Campo, Declarações & Evidências")
         with st.form(f"f_campo_{processo_id_selecionado}"):
             col_c1, col_c2 = st.columns(2)
-            with col_c1:
-                p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"cd_cd_{processo_id_selecionado}")
-            with col_c2:
-                p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"cd_ch_{processo_id_selecionado}")
+            with col_c1: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"cd_cd_{processo_id_selecionado}")
+            with col_c2: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"cd_ch_{processo_id_selecionado}")
 
             st.markdown("<br>", unsafe_allow_html=True)
             p_atual["local_diligencia"] = st.text_input("Endereço / Local da Diligência", value=p_atual.get("local_diligencia", ""), key=f"cd_ld_{processo_id_selecionado}")
             
             v_pres = p_atual.get("presentes_pericia", "")
             p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes na Vistoria (Nome e Função)", value=v_pres, height=calcula_altura(v_pres, 80), key=f"cd_pp_{processo_id_selecionado}")
-            
             v_ca = p_atual.get("campo_declaracoes_autor", "")
             p_atual["campo_declaracoes_autor"] = st.text_area("Informações prestadas pelo Segurado / Autor", value=v_ca, height=calcula_altura(v_ca, 120), key=f"cd_cda_{processo_id_selecionado}")
-            
             v_cr = p_atual.get("campo_declaracoes_reu", "")
             p_atual["campo_declaracoes_reu"] = st.text_area("Informações prestadas pelo Empregador / Acompanhante", value=v_cr, height=calcula_altura(v_cr, 120), key=f"cd_cdr_{processo_id_selecionado}")
-            
             v_cm = p_atual.get("campo_medicoes", "")
             p_atual["campo_medicoes"] = st.text_area("Medições Realizadas em Campo (Ex: Sonometria NHO-01, IBUTG)", value=v_cm, height=calcula_altura(v_cm, 120), key=f"cd_cm_{processo_id_selecionado}")
 
-            st.markdown("<br>", unsafe_allow_html=True)
             if st.form_submit_button("💾 Salvar Textos de Campo"):
-                db_processos[processo_id_selecionado] = p_atual
-                salvar_dados(db_processos)
+                salvar_processo(processo_id_selecionado, p_atual)
                 st.toast("✅ Textos de campo salvos!", icon="💾")
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
-        st.markdown("#### 📍 Captura Rápida de GPS (Híbrido: Satélite ou Rede)")
-        
+        st.markdown("#### 📍 Captura Rápida de GPS")
         gps_input_val = st.text_input("Coordenada GPS Atual (Sessão Ativa):", value=st.session_state.get("gps_field_main", ""), key=f"cd_gps_{processo_id_selecionado}", placeholder="GPS_TARGET_FIELD")
         if gps_input_val != st.session_state.get("gps_field_main", ""):
             st.session_state.gps_field_main = gps_input_val
@@ -861,69 +751,45 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                     mainInputs.forEach(input => {
                         let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, "value").set;
                         nativeInputValueSetter.call(input, coordStr);
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
                         input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
                     });
-                    
                     const photoInputs = window.parent.document.querySelectorAll('input[placeholder="GPS_FOTO"]');
                     photoInputs.forEach(input => {
                         if(!input.value || input.value === "") { 
                             let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype, "value").set;
                             nativeInputValueSetter.call(input, coordStr);
-                            input.dispatchEvent(new Event('input', { bubbles: true }));
-                            input.dispatchEvent(new Event('change', { bubbles: true }));
+                            input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
                         }
                     });
                 }
-
                 function getGPS() {
-                    var st = document.getElementById("gps_status");
-                    st.innerHTML = "Buscando satélites (isso pode levar alguns segundos)...";
+                    var st = document.getElementById("gps_status"); st.innerHTML = "Buscando satélites...";
                     if (navigator.geolocation) {
                         navigator.geolocation.getCurrentPosition(
                             function(position) {
-                                var lat = position.coords.latitude.toFixed(6);
-                                var lon = position.coords.longitude.toFixed(6);
-                                var coordStr = lat + ", " + lon;
-                                st.innerHTML = "✅ GPS Satélite Obtido! Inserido no sistema.";
-                                injectGPS(coordStr);
+                                var coordStr = position.coords.latitude.toFixed(6) + ", " + position.coords.longitude.toFixed(6);
+                                st.innerHTML = "✅ GPS Satélite Obtido!"; injectGPS(coordStr);
                             },
                             function(error) {
-                                st.innerHTML = "Satélite fraco. Tentando via rede 4G/Wi-Fi (rápido)...";
+                                st.innerHTML = "Tentando via rede 4G/Wi-Fi (rápido)...";
                                 navigator.geolocation.getCurrentPosition(
                                     function(position) {
-                                        var lat = position.coords.latitude.toFixed(6);
-                                        var lon = position.coords.longitude.toFixed(6);
-                                        var coordStr = lat + ", " + lon;
-                                        st.innerHTML = "✅ GPS Rede Obtido! Inserido no sistema.";
-                                        injectGPS(coordStr);
+                                        var coordStr = position.coords.latitude.toFixed(6) + ", " + position.coords.longitude.toFixed(6);
+                                        st.innerHTML = "✅ GPS Rede Obtido!"; injectGPS(coordStr);
                                     },
-                                    function(err2) {
-                                        st.innerHTML = "❌ Erro de GPS. Ative a localização no tablet e dê permissão ao navegador.";
-                                    },
+                                    function(err2) { st.innerHTML = "❌ Erro de GPS. Ative a localização no tablet."; },
                                     {timeout: 10000, enableHighAccuracy: false, maximumAge: 60000}
                                 );
-                            },
-                            {timeout: 8000, enableHighAccuracy: true, maximumAge: 0}
+                            }, {timeout: 8000, enableHighAccuracy: true, maximumAge: 0}
                         );
-                    } else {
-                        st.innerHTML = "Geolocalização não suportada.";
-                    }
+                    } else { st.innerHTML = "Geolocalização não suportada."; }
                 }
-                
-                // Script injetado para auto-expandir caixas de texto em tempo real no tablet
                 setInterval(function() {
                     const textareas = window.parent.document.querySelectorAll("textarea");
                     textareas.forEach(ta => {
-                        if(ta.scrollHeight > ta.clientHeight) {
-                            ta.style.height = 'auto';
-                            ta.style.height = ta.scrollHeight + 'px';
-                        }
-                        ta.addEventListener('input', function() {
-                            this.style.height = 'auto';
-                            this.style.height = this.scrollHeight + 'px';
-                        });
+                        if(ta.scrollHeight > ta.clientHeight) { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }
+                        ta.addEventListener('input', function() { this.style.height = 'auto'; this.style.height = this.scrollHeight + 'px'; });
                     });
                 }, 1000);
                 </script>
@@ -933,40 +799,28 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### 📸 Captura de Evidências Fotográficas")
         
-        # Opção 1: Câmera Direta
+        # Opção 1: Câmera Direta (Converte para Base64 para guardar na nuvem)
         img_camera = st.camera_input("📷 Tirar Foto Direta (Webcam / Câmera do Dispositivo)", key=f"cam_in_{processo_id_selecionado}")
         if img_camera is not None:
             file_bytes = img_camera.getvalue()
-            file_hash = hashlib.md5(file_bytes).hexdigest()[:10]
-            nome_img = f"{processo_id_selecionado}_{file_hash}_cam.jpg"
-            path_img = os.path.join(FOTOS_DIR, nome_img)
-            
-            if not any(f["path"] == path_img for f in p_atual["campo_fotos"]):
-                with open(path_img, "wb") as f:
-                    f.write(file_bytes)
-                
-                gps_auto = st.session_state.get("gps_field_main", "")
-                p_atual["campo_fotos"].append({
-                    "path": path_img,
-                    "gps": gps_auto,
-                    "legenda": "Registro fotográfico obtido em diligência pericial."
-                })
-                salvar_dados(db_processos)
-                st.toast("✅ Foto adicionada!", icon="📸")
-                st.rerun()
+            b64_encoded = base64.b64encode(file_bytes).decode('utf-8')
+            gps_auto = st.session_state.get("gps_field_main", "")
+            p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico obtido em diligência pericial." })
+            salvar_processo(processo_id_selecionado, p_atual)
+            st.toast("✅ Foto capturada e guardada na nuvem!", icon="📸")
+            st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # Opção 2: Envio de Arquivos
+        # Opção 2: Envio de Arquivos (Converte para Base64 para guardar na nuvem)
         col_up1, col_up2 = st.columns([3, 1])
-        with col_up1:
-            fotos_upload = st.file_uploader("📁 Ou Enviar Foto(s) da Galeria / Arquivos", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"up_gal_{processo_id_selecionado}")
+        with col_up1: fotos_upload = st.file_uploader("📁 Ou Enviar Foto(s) da Galeria / Arquivos", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"up_gal_{processo_id_selecionado}")
         with col_up2:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("🗑️ Limpar Todas", key=f"cl_f_{processo_id_selecionado}"):
                 p_atual["campo_fotos"] = []
-                salvar_dados(db_processos)
+                salvar_processo(processo_id_selecionado, p_atual)
                 st.toast("✅ Lista de fotos limpa!", icon="🗑️")
                 st.rerun()
 
@@ -974,42 +828,29 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             novas_fotos = False
             for img in fotos_upload:
                 file_bytes = img.getvalue()
-                file_hash = hashlib.md5(file_bytes).hexdigest()[:10]
-                nome_img = f"{processo_id_selecionado}_{file_hash}_{img.name}"
-                path_img = os.path.join(FOTOS_DIR, nome_img)
+                b64_encoded = base64.b64encode(file_bytes).decode('utf-8')
                 
-                if not any(f["path"] == path_img for f in p_atual["campo_fotos"]):
-                    with open(path_img, "wb") as f:
-                        f.write(file_bytes)
-                    
+                if not any(f.get("base64") == b64_encoded for f in p_atual["campo_fotos"]):
                     gps_auto = st.session_state.get("gps_field_main", "")
-                    p_atual["campo_fotos"].append({
-                        "path": path_img,
-                        "gps": gps_auto,
-                        "legenda": "Registro fotográfico obtido em diligência pericial."
-                    })
+                    p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico obtido em diligência pericial." })
                     novas_fotos = True
-            
             if novas_fotos:
-                salvar_dados(db_processos)
-                st.toast("✅ Foto(s) enviada(s)!", icon="📸")
+                salvar_processo(processo_id_selecionado, p_atual)
+                st.toast("✅ Foto(s) enviada(s) para a nuvem!", icon="📸")
                 st.rerun()
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         col_ger, col_btn_geral = st.columns([2, 1])
-        with col_ger:
-            st.markdown(f"#### 🖼️ Gerenciar Fotos Cadastradas ({len(p_atual.get('campo_fotos', []))} fotos):")
+        with col_ger: st.markdown(f"#### 🖼️ Gerenciar Fotos Cadastradas ({len(p_atual.get('campo_fotos', []))} fotos):")
         with col_btn_geral:
             if st.button("⚡ Salvar GPS em Todas as Fotos", key=f"svgps_{processo_id_selecionado}"):
                 gps_atual_sessao = st.session_state.get("gps_field_main", "")
                 if gps_atual_sessao:
-                    for f_dict in p_atual["campo_fotos"]:
-                        f_dict["gps"] = gps_atual_sessao
-                    salvar_dados(db_processos)
+                    for f_dict in p_atual["campo_fotos"]: f_dict["gps"] = gps_atual_sessao
+                    salvar_processo(processo_id_selecionado, p_atual)
                     st.toast("✅ Coordenadas salvas em lote!", icon="📍")
                     st.rerun()
-                else:
-                    st.warning("Obtenha o GPS no botão acima primeiro.")
+                else: st.warning("Obtenha o GPS no botão acima primeiro.")
 
         if not p_atual.get("campo_fotos"):
             st.info("Nenhuma foto cadastrada ainda. Envie fotos acima para começar.")
@@ -1018,10 +859,12 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 with st.container():
                     col_img, col_dados = st.columns([1, 2])
                     with col_img:
-                        if os.path.exists(foto_dict["path"]):
+                        if "base64" in foto_dict:
+                            st.image(base64.b64decode(foto_dict["base64"]), width=220)
+                        elif "path" in foto_dict and os.path.exists(foto_dict["path"]):
                             st.image(foto_dict["path"], width=220)
                         else:
-                            st.warning("[Arquivo não encontrado]")
+                            st.warning("[Imagem não encontrada]")
                     with col_dados:
                         nova_legenda = st.text_input(f"Legenda da Figura {idx+1}", value=foto_dict.get("legenda", ""), key=f"lg_{processo_id_selecionado}_{idx}")
                         novo_gps = st.text_input(f"Coordenadas GPS (Figura {idx+1})", value=foto_dict.get("gps", ""), key=f"cg_{processo_id_selecionado}_{idx}", placeholder="GPS_FOTO")
@@ -1031,13 +874,13 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                             if st.button(f"💾 Atualizar Foto {idx+1}", key=f"updf_{processo_id_selecionado}_{idx}"):
                                 p_atual["campo_fotos"][idx]["legenda"] = nova_legenda
                                 p_atual["campo_fotos"][idx]["gps"] = novo_gps
-                                salvar_dados(db_processos)
+                                salvar_processo(processo_id_selecionado, p_atual)
                                 st.toast("✅ Legenda atualizada!", icon="💾")
                                 st.rerun()
                         with c_del:
                             if st.button(f"🗑️ Excluir Foto {idx+1}", key=f"delf_{processo_id_selecionado}_{idx}"):
                                 p_atual["campo_fotos"].pop(idx)
-                                salvar_dados(db_processos)
+                                salvar_processo(processo_id_selecionado, p_atual)
                                 st.toast("🗑️ Foto removida!")
                                 st.rerun()
                     st.markdown("---")
@@ -1056,21 +899,13 @@ elif opcao == "🗑️ Excluir Processo":
                 st.session_state.confirmar_exclusao_dupla = True
                 st.rerun()
         else:
-            st.warning("🚨 TEM CERTEZA ABSOLUTA? Esta ação apagará permanentemente todos os dados e fotos deste caso!")
+            st.warning("🚨 TEM CERTEZA ABSOLUTA? Esta ação apagará permanentemente todos os dados deste caso na nuvem!")
             col_sim, col_nao = st.columns(2)
             with col_sim:
                 if st.button("🔴 SIM, EXCLUIR PERMANENTEMENTE"):
-                    for f_dict in p_excluir.get("campo_fotos", []):
-                        f_path = f_dict.get("path")
-                        if f_path and os.path.exists(f_path):
-                            try:
-                                os.remove(f_path)
-                            except:
-                                pass
-                    del db_processos[processo_id_selecionado]
-                    salvar_dados(db_processos)
+                    excluir_processo(processo_id_selecionado)
                     st.session_state.confirmar_exclusao_dupla = False
-                    st.toast("🗑️ Processo excluído!", icon="🚨")
+                    st.toast("🗑️ Processo excluído da nuvem!", icon="🚨")
                     st.session_state.processo_ativo = None
                     st.rerun()
             with col_nao:
@@ -1091,7 +926,6 @@ elif opcao == "📄 Gerar Documento Word Final":
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("📥 Gerar e Baixar Documento Oficial (.docx)"):
             doc = Document()
-            
             for section in doc.sections:
                 section.top_margin = Cm(3.0)
                 section.left_margin = Cm(3.0)
@@ -1111,7 +945,6 @@ elif opcao == "📄 Gerar Documento Word Final":
                 r_title.bold = True
                 r_title.font.name = 'Abadi'
                 r_title.font.size = Pt(11)
-                
                 r_text = p_b.add_run(f"{text if text else '[Informação não localizada]'}")
                 r_text.font.name = 'Abadi'
                 r_text.font.size = Pt(11)
@@ -1124,10 +957,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                 r_title.bold = True
                 r_title.font.name = 'Abadi'
                 r_title.font.size = Pt(11)
-                
-                if not text:
-                    text = "[Informação/Documento não localizado nos autos anexados]"
-                    
+                if not text: text = "[Informação/Documento não localizado nos autos anexados]"
                 for linha in text.split("\n"):
                     if linha.strip():
                         p_text = doc_obj.add_paragraph()
@@ -1157,14 +987,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                 tblPr.append(tblW)
 
             logo_doc = None
-            if os.path.exists(LOGO_FILE):
-                logo_doc = LOGO_FILE
-            else:
-                for f in os.listdir("."):
-                    if "logo" in f.lower() and f.lower().endswith((".jpg", ".png", ".jpeg")):
-                        logo_doc = f
-                        break
-
+            if os.path.exists(LOGO_FILE): logo_doc = LOGO_FILE
             if logo_doc:
                 p_logo = doc.add_paragraph()
                 p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1233,8 +1056,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                     t_epi = doc.add_table(rows=len(quadro_epis) + 1, cols=4)
                     definir_largura_tabela_100(t_epi)
                     headers = ["Descrição do EPI", "C.A.", "Periodicidade", "Observações / Eficácia"]
-                    for h_idx, h_text in enumerate(headers):
-                        t_epi.rows[0].cells[h_idx].text = h_text
+                    for h_idx, h_text in enumerate(headers): t_epi.rows[0].cells[h_idx].text = h_text
                     
                     for r_idx, epi in enumerate(quadro_epis, start=1):
                         t_epi.rows[r_idx].cells[0].text = epi.get('descricao', '')
@@ -1282,10 +1104,8 @@ elif opcao == "📄 Gerar Documento Word Final":
             else:
                 adicionar_titulo("1. IDENTIFICAÇÃO DO PROCESSO", level=2)
                 dados_ident = [
-                    ("Número do Processo", p.get('processo_num', '')),
-                    ("Órgão Julgador / Vara", p.get('orgao_julgador', '')),
-                    ("Data de Autuação (Ajuizamento)", p.get('data_autuacao', '')),
-                    ("Valor da Causa", p.get('valor_causa', '')),
+                    ("Número do Processo", p.get('processo_num', '')), ("Órgão Julgador / Vara", p.get('orgao_julgador', '')),
+                    ("Data de Autuação (Ajuizamento)", p.get('data_autuacao', '')), ("Valor da Causa", p.get('valor_causa', '')),
                     ("Rito Processual", p.get('rito_processual', ''))
                 ]
                 t_id = doc.add_table(rows=len(dados_ident) + 1, cols=2)
@@ -1362,8 +1182,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                     t_epi = doc.add_table(rows=len(quadro_epis) + 1, cols=4)
                     definir_largura_tabela_100(t_epi)
                     headers = ["Descrição do EPI", "C.A.", "Data de Entrega", "Observações"]
-                    for h_idx, h_text in enumerate(headers):
-                        t_epi.rows[0].cells[h_idx].text = h_text
+                    for h_idx, h_text in enumerate(headers): t_epi.rows[0].cells[h_idx].text = h_text
                     
                     for r_idx, epi in enumerate(quadro_epis, start=1):
                         t_epi.rows[r_idx].cells[0].text = epi.get('descricao', '')
@@ -1414,17 +1233,16 @@ elif opcao == "📄 Gerar Documento Word Final":
             if p.get("campo_fotos"):
                 adicionar_titulo("REGISTROS FOTOGRÁFICOS DE CAMPO", level=3)
                 for idx, foto_dict in enumerate(p["campo_fotos"]):
-                    f_path = foto_dict.get("path")
-                    if f_path and os.path.exists(f_path):
+                    if "base64" in foto_dict:
                         try:
                             p_img = doc.add_paragraph()
                             p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            p_img.add_run().add_picture(f_path, width=Inches(4.5))
+                            img_stream = io.BytesIO(base64.b64decode(foto_dict["base64"]))
+                            p_img.add_run().add_picture(img_stream, width=Inches(4.5))
                             
                             texto_legenda = foto_dict.get("legenda", "Registro fotográfico.")
                             coords_gps = foto_dict.get("gps", "")
-                            if coords_gps:
-                                texto_legenda += f" ({coords_gps})"
+                            if coords_gps: texto_legenda += f" ({coords_gps})"
                             
                             p_leg = doc.add_paragraph(f"Figura {idx+1}: {texto_legenda}")
                             p_leg.alignment = WD_ALIGN_PARAGRAPH.CENTER
