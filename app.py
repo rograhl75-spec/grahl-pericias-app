@@ -114,11 +114,9 @@ def parse_pre_relatorio(doc):
     empresas_cnis = []
     epis_extraidos = []
     
-    # Extração de Tabelas
     for table in doc.tables:
         if len(table.rows) > 0:
             hdr = [cell.text.lower() for cell in table.rows[0].cells]
-            # Tabela de EPI
             if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h or "cert" in h for h in hdr):
                 for row in table.rows[1:]:
                     cells = row.cells
@@ -129,7 +127,6 @@ def parse_pre_relatorio(doc):
                     desc = desc.replace("**", "").replace("*", "")
                     if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
                         epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
-            # Tabela CNIS (Módulo Extrajudicial)
             elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
                 for row in table.rows[1:]:
                     if len(row.cells) >= 2:
@@ -137,90 +134,111 @@ def parse_pre_relatorio(doc):
                         if emp_text and "AGRUPAMENTO" not in emp_text:
                             empresas_cnis.append(emp_text)
 
-    if epis_extraidos:
-        dados["quadro_epis"] = epis_extraidos
+    if epis_extraidos: dados["quadro_epis"] = epis_extraidos
 
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
+    
+    # Injeta quebras de linha caso os títulos estejam no mesmo parágrafo
+    labels_to_break = [
+        r"Número do Processo", r"Órgão Julgador / Vara", r"Órgão Julgador", r"Vara", 
+        r"Data de Autuação", r"Ajuizamento", r"Valor da Causa", r"Rito Processual", 
+        r"Reclamante \(Autor/Autora\)", r"Reclamante", r"Nome do Segurado",
+        r"CPF/NIT", r"CPF", r"CNPJ", r"Data de Nascimento", r"Reclamada \(Ré/Empresa\)", 
+        r"Reclamada \(Ré / Empresa\)", r"Reclamada", r"Empresa / Tomador", r"Data de Admissão", 
+        r"Status do Contrato", r"Período Imprescrito", r"Cargo\(s\) / Função\(ões\)", 
+        r"Profissão / Cargo", r"Setor / Lotação / Local", r"Última Remuneração", 
+        r"Objeto da Perícia", r"Atividades Descritas", r"Atividades Típicas",
+        r"Relato Inicial", r"Agentes Nocivos / Riscos Alegados", r"Agentes Nocivos", 
+        r"Agentes Físicos", r"Agentes Químicos", r"Agentes Biológicos", 
+        r"Enquadramento Legal", r"Pedidos Técnicos", r"Preliminares Periciais", 
+        r"Defesa de Mérito", r"Fase Processual Atual", r"Fase Processual", r"Data da Vistoria",
+        r"Horário", r"Local / Endereço", r"LTCAT", r"Laudo de Insalubridade", r"PPP", 
+        r"PGR / PPRA / PCMAT", r"PGR", r"Ordens de Serviço", r"ASOs / PCMSO", r"ASOs", 
+        r"Outros Documentos", r"Síntese e Análise", r"9\.1\. Quesitos", r"9\.2\. Quesitos", 
+        r"9\.3\. Quesitos"
+    ]
+    
+    for label in labels_to_break:
+        pattern = r"(?<!\n)(" + label + r"[\s]*:)"
+        texto = re.sub(pattern, r"\n\1", texto, flags=re.IGNORECASE)
+
+    def clean_val(val): return re.sub(r"_+", "", val).strip()
+
+    # Busca blindada dos identificadores (garante que formulários vazios não apaguem)
+    m_nome = re.findall(r"(?:Reclamante \(Autor/Autora\)|Nome do Segurado|Reclamante|Autor/Autora|Nome)[\s:]*([^\n\|]+)", texto, re.IGNORECASE)
+    for m in m_nome:
+        v = clean_val(m)
+        if v and not v.lower().startswith("e cpf"):
+            v = re.sub(r"\((?:CPF|NIT|PIS).*?\)?$", "", v, flags=re.IGNORECASE).strip()
+            if "reclamante_nome" not in dados: dados["reclamante_nome"] = v
+
+    m_cpf = re.findall(r"(?:CPF/NIT|CPF\s*/\s*NIT|CPF|NIT|PIS)[\s:]*([\d\.\-\/]+(?:\s*/\s*[\d\.\-\/]+)?)", texto, re.IGNORECASE)
+    for m in m_cpf:
+        v = clean_val(m)
+        if v and "reclamante_cpf" not in dados: dados["reclamante_cpf"] = v
+
+    m_emp = re.findall(r"(?:Reclamada \(Ré/Empresa\)|Reclamada \(Ré / Empresa\)|Razão Social.*?|Empresa / Tomador|Reclamada|Empresa)[\s:]*([^\n\|]+)", texto, re.IGNORECASE)
+    for m in m_emp:
+        v = clean_val(m)
+        if v and "CNPJ" not in v.upper():
+            if "reclamada_nome" not in dados: dados["reclamada_nome"] = v
+        elif v:
+            v = re.sub(r"\(?CNPJ.*$", "", v, flags=re.IGNORECASE).strip()
+            if "reclamada_nome" not in dados: dados["reclamada_nome"] = v
+
+    m_cnpj = re.findall(r"CNPJ[\s:]*([\d\.\-\/]+)", texto, re.IGNORECASE)
+    for m in m_cnpj:
+        v = clean_val(m)
+        if v and "reclamada_cnpj" not in dados: dados["reclamada_cnpj"] = v
+
+    m_proc = re.findall(r"(?:Número do Processo|Processo)[\s:]*([^\n\|]+)", texto, re.IGNORECASE)
+    for m in m_proc:
+        v = clean_val(m)
+        if v and "processo_num" not in dados: dados["processo_num"] = v
+
     linhas_limpas = [l.strip() for l in texto.split('\n') if l.strip()]
 
     field_matchers = [
-        ("número do processo", "processo_num"),
-        ("órgão julgador", "orgao_julgador"),
-        ("vara", "orgao_julgador"),
-        ("data de autuação", "data_autuacao"),
-        ("ajuizamento", "data_autuacao"),
-        ("valor da causa", "valor_causa"),
-        ("rito processual", "rito_processual"),
-        ("reclamante (autor/autora)", "reclamante_nome"),
-        ("nome do segurado", "reclamante_nome"),
-        ("reclamante", "reclamante_nome"),
-        ("nome", "reclamante_nome"),
-        ("cpf/nit", "reclamante_cpf"),
-        ("cpf / nit", "reclamante_cpf"),
-        ("cpf", "reclamante_cpf"),
-        ("data de nascimento", "segurado_nascimento"),
-        ("reclamada (ré/empresa)", "reclamada_nome"),
-        ("reclamada (ré / empresa)", "reclamada_nome"),
-        ("empresa / tomador", "reclamada_nome"),
-        ("reclamada", "reclamada_nome"),
-        ("razão social", "reclamada_nome"),
-        ("cnpj", "reclamada_cnpj"),
-        ("data de admissão", "data_admissao"),
-        ("status do contrato", "status_contrato"),
-        ("período imprescrito", "periodo_imprescrito"),
-        ("cargo(s) / função(ões)", "cargos"),
-        ("profissão / cargo", "profissao_cargo"),
-        ("setor / lotação", "setor"),
-        ("última remuneração", "ultima_remuneracao"),
-        ("objeto da perícia", "objeto_pericia"),
-        ("atividades descritas", "atividades_inicial"),
-        ("atividades típicas", "relato_inicial"),
-        ("agentes nocivos", "agentes_alegados"),
-        ("agentes físicos", "apr_fisicos"),
-        ("agentes químicos", "apr_quimicos"),
-        ("agentes biológicos", "apr_biologicos"),
-        ("enquadramento legal", "enquadramento_legal_prev"),
-        ("pedidos técnicos", "pedidos_tecnicos"),
-        ("preliminares periciais", "preliminares_periciais"),
-        ("defesa de mérito", "defesa_merito_sst"),
-        ("fase processual", "fase_processual"),
-        ("data da vistoria", "campo_data"),
-        ("horário", "campo_horario"),
-        ("local / endereço", "local_diligencia"),
-        ("ltcat", "doc_ltcat"),
-        ("laudo de insalubridade", "doc_laudo"),
-        ("ppp", "doc_ppp"),
-        ("pgr / ppra", "doc_pgr"),
-        ("ordens de serviço", "doc_os"),
-        ("asos / pcmsos", "doc_asos"),
-        ("outros documentos", "doc_outros"),
-        ("9.1. quesitos do juízo", "quesitos_juizo"),
-        ("quesitos do juízo", "quesitos_juizo"),
-        ("9.2. quesitos do reclamante", "quesitos_autor"),
-        ("quesitos do reclamante", "quesitos_autor"),
-        ("quesitos do autor", "quesitos_autor"),
-        ("9.3. quesitos da reclamada", "quesitos_reu"),
-        ("quesitos da reclamada", "quesitos_reu"),
-        ("quesitos da ré", "quesitos_reu")
+        ("número do processo", "processo_num"), ("órgão julgador", "orgao_julgador"),
+        ("vara", "orgao_julgador"), ("data de autuação", "data_autuacao"),
+        ("ajuizamento", "data_autuacao"), ("valor da causa", "valor_causa"),
+        ("rito processual", "rito_processual"), ("reclamante", "reclamante_nome"),
+        ("nome", "reclamante_nome"), ("cpf", "reclamante_cpf"), ("nit", "reclamante_cpf"),
+        ("data de nascimento", "segurado_nascimento"), ("reclamada", "reclamada_nome"),
+        ("empresa", "reclamada_nome"), ("razão social", "reclamada_nome"), ("cnpj", "reclamada_cnpj"),
+        ("data de admissão", "data_admissao"), ("status do contrato", "status_contrato"),
+        ("período imprescrito", "periodo_imprescrito"), ("cargo", "cargos"), ("função", "cargos"),
+        ("profissão", "profissao_cargo"), ("setor", "setor"), ("lotação", "setor"),
+        ("última remuneração", "ultima_remuneracao"), ("objeto da perícia", "objeto_pericia"),
+        ("atividades", "atividades_inicial"), ("relato inicial", "relato_inicial"),
+        ("agentes nocivos", "agentes_alegados"), ("agentes físicos", "apr_fisicos"),
+        ("agentes químicos", "apr_quimicos"), ("agentes biológicos", "apr_biologicos"),
+        ("enquadramento legal", "enquadramento_legal_prev"), ("pedidos técnicos", "pedidos_tecnicos"),
+        ("preliminares periciais", "preliminares_periciais"), ("defesa de mérito", "defesa_merito_sst"),
+        ("fase processual", "fase_processual"), ("data da vistoria", "campo_data"),
+        ("horário", "campo_horario"), ("local", "local_diligencia"), ("endereço", "local_diligencia"),
+        ("ltcat", "doc_ltcat"), ("laudo", "doc_laudo"), ("ppp", "doc_ppp"), ("pgr", "doc_pgr"),
+        ("ppra", "doc_pgr"), ("ordens de serviço", "doc_os"), ("aso", "doc_asos"), ("pcmso", "doc_asos"),
+        ("outros documentos", "doc_outros"), ("9.1. quesitos do juízo", "quesitos_juizo"),
+        ("9.2. quesitos do reclamante", "quesitos_autor"), ("9.3. quesitos da reclamada", "quesitos_reu")
     ]
-    sorted_matchers = sorted(field_matchers, key=lambda x: len(x[0]), reverse=True)
-
+    
     current_key = None
     current_buffer = []
-    last_entity = None
-
-    def clean_val(val):
-        return re.sub(r"_+", "", val).strip()
 
     def save_current():
         if current_key and current_buffer:
             val = "\n".join(current_buffer).strip()
             val = clean_val(val)
-            if val and "[informação" not in val.lower():
-                dados[current_key] = val
+            if val and "[informação" not in val.lower() and val != "-":
+                # Protege as variáveis de identificação para não serem subscritas
+                protected_keys = ["reclamante_nome", "reclamante_cpf", "reclamada_nome", "reclamada_cnpj", "processo_num", "segurado_nascimento"]
+                if current_key in protected_keys:
+                    if not dados.get(current_key): dados[current_key] = val
+                else:
+                    dados[current_key] = val
 
     for linha in linhas_limpas:
-        # Troca de bloco numérico (Ex: "1. IDENTIFICAÇÃO")
         if re.match(r'^\d+(\.\d*)*[\s\.\-]+[A-ZÀ-Ú]', linha) and ":" not in linha:
             save_current()
             current_key = None
@@ -236,62 +254,46 @@ def parse_pre_relatorio(doc):
             if "advogado" in prefix:
                 save_current()
                 val = clean_val(rest)
-                if last_entity == "reclamante": dados["reclamante_adv"] = val
-                elif last_entity == "reclamada": dados["reclamada_adv"] = val
-                else:
-                    if not dados.get("reclamante_adv"): dados["reclamante_adv"] = val
+                if val:
+                    if "reclamante" in prefix: dados["reclamante_adv"] = val
+                    elif "reclamada" in prefix or "ré" in prefix: dados["reclamada_adv"] = val
+                    elif not dados.get("reclamante_adv"): dados["reclamante_adv"] = val
                     else: dados["reclamada_adv"] = val
                 current_key = None
                 current_buffer = []
-                matched = True
                 continue
 
             matched_key = None
-            # Tenta match exato ou por prefixo primeiro
-            for kw, d_key in sorted_matchers:
-                if prefix == kw or prefix.startswith(kw):
+            for kw, d_key in field_matchers:
+                if kw in prefix and "acompanhante" not in prefix:
                     matched_key = d_key
                     break
-            # Fallback para match contido, ignorando campos vazios de acompanhante
-            if not matched_key:
-                for kw, d_key in sorted_matchers:
-                    if kw in prefix and "acompanhante" not in prefix:
-                        matched_key = d_key
-                        break
 
             if matched_key:
                 save_current()
                 current_key = matched_key
                 rest_clean = clean_val(rest)
+                
+                if matched_key == "reclamante_nome":
+                    m_c = re.search(r"(?:CPF|NIT|PIS)[\s:]*([\d\.\-\/]+)", rest_clean, re.IGNORECASE)
+                    if m_c:
+                        if not dados.get("reclamante_cpf"): dados["reclamante_cpf"] = m_c.group(1).strip()
+                        rest_clean = re.sub(r"\((?:CPF|NIT|PIS).*?\)", "", rest_clean, flags=re.IGNORECASE).strip()
+                elif matched_key == "reclamada_nome":
+                    m_c = re.search(r"CNPJ[\s:]*([\d\.\-\/]+)", rest_clean, re.IGNORECASE)
+                    if m_c:
+                        if not dados.get("reclamada_cnpj"): dados["reclamada_cnpj"] = m_c.group(1).strip()
+                        rest_clean = re.sub(r"\(CNPJ.*?\)", "", rest_clean, flags=re.IGNORECASE).strip()
+
                 current_buffer = [rest_clean] if rest_clean else []
                 matched = True
 
-                # Lógicas inline (Ex: Nome (CPF: xxx))
-                if matched_key == "reclamante_nome":
-                    last_entity = "reclamante"
-                    if rest_clean:
-                        m_cpf = re.search(r"(?:CPF/NIT|CPF|NIT|PIS):\s*([\d\.\-\/]+)", rest_clean, re.IGNORECASE)
-                        if m_cpf:
-                            dados["reclamante_cpf"] = m_cpf.group(1).strip()
-                            current_buffer = [re.sub(r"\((?:CPF/NIT|CPF|NIT|PIS).*?\)", "", rest_clean, flags=re.IGNORECASE).strip()]
-                elif matched_key == "reclamada_nome":
-                    last_entity = "reclamada"
-                    if rest_clean:
-                        m_cnpj = re.search(r"CNPJ:\s*([\d\.\-\/]+)", rest_clean, re.IGNORECASE)
-                        if m_cnpj:
-                            dados["reclamada_cnpj"] = m_cnpj.group(1).strip()
-                            current_buffer = [re.sub(r"\(CNPJ:.*?\)", "", rest_clean, flags=re.IGNORECASE).strip()]
-
         if not matched and current_key:
-            if linha:
-                current_buffer.append(linha)
+            if linha: current_buffer.append(linha)
 
     save_current()
 
-    # Preenchimentos complementares
-    if not dados.get("reclamada_nome") and empresas_cnis:
-        dados["reclamada_nome"] = empresas_cnis[-1]
-        
+    if not dados.get("reclamada_nome") and empresas_cnis: dados["reclamada_nome"] = empresas_cnis[-1]
     if dados.get("profissao_cargo") and not dados.get("cargos"): dados["cargos"] = dados.get("profissao_cargo")
     if dados.get("cargos") and not dados.get("profissao_cargo"): dados["profissao_cargo"] = dados.get("cargos")
     
