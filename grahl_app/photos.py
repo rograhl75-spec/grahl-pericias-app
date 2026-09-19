@@ -60,6 +60,8 @@ def normalize_photo_entry(value: object) -> dict[str, Any] | None:
     if not value.get("base64") and not value.get("path"):
         return None
     normalized: dict[str, Any] = dict(value)
+    if value.get("path"):
+        normalized["path"] = safe_str(value.get("path"))
     normalized["gps"] = normalize_multiline_text(value.get("gps", ""))
     normalized["legenda"] = normalize_multiline_text(value.get("legenda", "")) or PHOTO_DEFAULT_CAPTION
     if value.get("base64"):

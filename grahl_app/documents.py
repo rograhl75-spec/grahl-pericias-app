@@ -294,15 +294,18 @@ def build_document_bytes(process_data: dict) -> tuple[io.BytesIO, list[str]]:
     if process.get("campo_fotos"):
         _add_title(document, "REGISTROS FOTOGRÁFICOS DE CAMPO", level=3)
         for index, photo in enumerate(process.get("campo_fotos", []), start=1):
-            if not photo.get("base64"):
-                warnings.append(f"Foto {index} ignorada: imagem ausente.")
-                continue
             try:
-                image_bytes = decode_photo_base64(photo.get("base64"))
                 paragraph = document.add_paragraph()
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                paragraph.add_run().add_picture(io.BytesIO(image_bytes), width=Inches(4.5))
-            except ValueError as exc:
+                if photo.get("base64"):
+                    image_bytes = decode_photo_base64(photo.get("base64"))
+                    paragraph.add_run().add_picture(io.BytesIO(image_bytes), width=Inches(4.5))
+                elif photo.get("path") and os.path.exists(safe_str(photo.get("path"))):
+                    paragraph.add_run().add_picture(safe_str(photo.get("path")), width=Inches(4.5))
+                else:
+                    warnings.append(f"Foto {index} ignorada: imagem ausente.")
+                    continue
+            except (ValueError, OSError) as exc:
                 warnings.append(f"Foto {index} ignorada: {exc}")
                 continue
             legend = safe_str(photo.get("legenda")) or "Registro fotográfico."

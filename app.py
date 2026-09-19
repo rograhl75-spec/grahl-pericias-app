@@ -230,6 +230,7 @@ if opcao == MENU_NEW:
             st.session_state.parsed_data = parse_pre_relatorio(doc_ext)
             st.success("Documento lido e mapeado com sucesso!")
         except (PackageNotFoundError, BadZipFile, ValueError) as exc:
+            st.session_state.parsed_data = {}
             st.error(f"Erro ao ler o arquivo Word informado: {exc}")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -673,10 +674,13 @@ elif opcao == MENU_FIELD:
                 with st.container():
                     col_img, col_dados = st.columns([1, 2])
                     with col_img:
-                        try:
-                            st.image(decode_photo_base64(foto_dict.get("base64")), width=220)
-                        except ValueError as exc:
-                            st.warning(f"[Imagem inválida: {exc}]")
+                        if foto_dict.get("path") and os.path.exists(str(foto_dict.get("path"))):
+                            st.image(str(foto_dict.get("path")), width=220)
+                        else:
+                            try:
+                                st.image(decode_photo_base64(foto_dict.get("base64")), width=220)
+                            except ValueError as exc:
+                                st.warning(f"[Imagem inválida: {exc}]")
                     with col_dados:
                         nova_legenda = st.text_input(f"Legenda da Figura {idx+1}", value=foto_dict.get("legenda", ""), key=f"lg_{processo_id_selecionado}_{idx}")
                         novo_gps = st.text_input(f"Coordenadas GPS (Figura {idx+1})", value=foto_dict.get("gps", ""), key=f"cg_{processo_id_selecionado}_{idx}", placeholder="GPS_FOTO")
