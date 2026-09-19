@@ -106,24 +106,123 @@ def calcula_altura(texto, min_h):
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
     return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
-# === SUPER EXTRATOR REGEX ESTRUTURADO ===
+# === SUPER EXTRATOR BASEADO EM TAGS DELIMITADORAS (À PROVA DE FALHAS) ===
 def parse_pre_relatorio(doc):
     dados = {}
-    linhas = []
-    empresas_cnis = []
+    texto_completo = ""
+    
+    # Extrai o texto do documento preservando quebras de linha
+    for p in doc.paragraphs:
+        texto_completo += p.text + "\n"
+        
+    # Extrai tabelas para não perder dados caso a IA tenha gerado a tabela em formato visual Word
+    for table in doc.tables:
+        for row in table.rows:
+            texto_completo += " | ".join([c.text.strip() for c in row.cells if c.text.strip()]) + "\n"
+
+    # Função Auxiliar Centralizada
+    def extrair_bloco(nome_tag):
+        padrao = r"\[START_" + nome_tag + r"\](.*?)\[END_" + nome_tag + r"\]"
+        match = re.search(padrao, texto_completo, re.DOTALL | re.IGNORECASE)
+        if match:
+            bloco_sujo = match.group(1).strip()
+            v_low = bloco_sujo.lower()
+            # Filtro limpador: Se a IA não achou a info, ela insere essas frases. O App limpa a caixa.
+            if "informação não localizad" in v_low and len(bloco_sujo) < 80:
+                return ""
+            if v_low == "n/a" or v_low == "[n/a]":
+                return ""
+            if "(inserir" in v_low and len(bloco_sujo) < 100:
+                return ""
+            return bloco_sujo
+        return ""
+
+    dados["modulo_atuacao"] = extrair_bloco("MODULO")
+    dados["processo_num"] = extrair_bloco("PROCESSO_NUM")
+    dados["orgao_julgador"] = extrair_bloco("ORGAO_JULGADOR")
+    dados["data_autuacao"] = extrair_bloco("DATA_AUTUACAO")
+    dados["valor_causa"] = extrair_bloco("VALOR_CAUSA")
+    dados["rito_processual"] = extrair_bloco("RITO")
+    
+    dados["reclamante_nome"] = extrair_bloco("RECLAMANTE_NOME")
+    dados["reclamante_cpf"] = extrair_bloco("RECLAMANTE_CPF")
+    dados["reclamante_adv"] = extrair_bloco("RECLAMANTE_ADV")
+    dados["segurado_nascimento"] = extrair_bloco("NASCIMENTO")
+    
+    dados["reclamada_nome"] = extrair_bloco("RECLAMADA_NOME")
+    dados["reclamada_cnpj"] = extrair_bloco("RECLAMADA_CNPJ")
+    dados["reclamada_adv"] = extrair_bloco("RECLAMADA_ADV")
+    
+    dados["data_admissao"] = extrair_bloco("DATA_ADMISSAO")
+    dados["status_contrato"] = extrair_bloco("STATUS_CONTRATO")
+    dados["periodo_imprescrito"] = extrair_bloco("PERIODO_IMPRESCRITO")
+    
+    cargos_extraidos = extrair_bloco("CARGOS")
+    dados["cargos"] = cargos_extraidos
+    dados["profissao_cargo"] = cargos_extraidos
+    
+    dados["setor"] = extrair_bloco("SETOR")
+    dados["ultima_remuneracao"] = extrair_bloco("ULTIMA_REMUNERACAO")
+    
+    dados["objeto_pericia"] = extrair_bloco("OBJETO_PERICIA")
+    
+    relato = extrair_bloco("RELATO_INICIAL")
+    dados["atividades_inicial"] = relato
+    dados["relato_inicial"] = relato
+    
+    dados["agentes_alegados"] = extrair_bloco("AGENTES_ALEGADOS")
+    dados["apr_fisicos"] = extrair_bloco("APR_FISICOS")
+    dados["apr_quimicos"] = extrair_bloco("APR_QUIMICOS")
+    dados["apr_biologicos"] = extrair_bloco("APR_BIOLOGICOS")
+    dados["enquadramento_legal_prev"] = extrair_bloco("ENQUADRAMENTO")
+    
+    dados["pedidos_tecnicos"] = extrair_bloco("PEDIDOS_TECNICOS")
+    dados["preliminares_periciais"] = extrair_bloco("PRELIMINARES")
+    dados["defesa_merito_sst"] = extrair_bloco("DEFESA_MERITO")
+    
+    dados["fase_processual"] = extrair_bloco("FASE_PROCESSUAL")
+    dados["campo_data"] = extrair_bloco("DATA_VISTORIA")
+    dados["campo_horario"] = extrair_bloco("HORARIO_VISTORIA")
+    dados["local_diligencia"] = extrair_bloco("LOCAL_VISTORIA")
+    
+    dados["doc_ltcat"] = extrair_bloco("DOC_LTCAT")
+    dados["doc_laudo"] = extrair_bloco("DOC_LAUDO")
+    dados["doc_ppp"] = extrair_bloco("DOC_PPP")
+    dados["doc_pgr"] = extrair_bloco("DOC_PGR")
+    dados["doc_os"] = extrair_bloco("DOC_OS")
+    dados["doc_asos"] = extrair_bloco("DOC_ASOS")
+    dados["doc_outros"] = extrair_bloco("DOC_OUTROS")
+    
+    dados["analise_epis_critica"] = extrair_bloco("SINTESE_EPIS")
+    
+    # Extração Círugica dos Quesitos
+    dados["quesitos_juizo"] = extrair_bloco("QUESITOS_JUIZO")
+    dados["quesitos_autor"] = extrair_bloco("QUESITOS_AUTOR")
+    dados["quesitos_reu"] = extrair_bloco("QUESITOS_REU")
+
+    # Extração robusta de EPIs do bloco de tags
+    quadro_epis_texto = extrair_bloco("QUADRO_EPIS")
     epis_extraidos = []
     
-    # 1. Puxa texto limpo EM ORDEM (Intercala Parágrafos e Tabelas perfeitamente)
-    for element in doc.element.body:
-        if element.tag.endswith('p'):
-            p = Paragraph(element, doc._body)
-            if p.text.strip():
-                linhas.append(p.text.strip())
-        elif element.tag.endswith('tbl'):
-            table = Table(element, doc._body)
+    if quadro_epis_texto:
+        linhas = quadro_epis_texto.strip().split('\n')
+        for linha in linhas:
+            # Pula cabeçalhos da tabela markdown e formatações de barra vazia
+            if '|' in linha and '---' not in linha and 'Descrição' not in linha and 'Observações' not in linha:
+                parts = [p.strip() for p in linha.split('|') if p.strip()]
+                if len(parts) >= 4:
+                    desc = parts[0]
+                    ca = parts[1]
+                    data = parts[2]
+                    obs = parts[3]
+                    if desc and "[informação" not in desc.lower() and "n/a" not in desc.lower():
+                        epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
+    
+    # Fallback (Caso a IA tenha criado uma Tabela Visual do Word ao invés de usar os "Pipes" no texto)
+    if not epis_extraidos:
+        for table in doc.tables:
             if len(table.rows) > 0:
                 hdr = [cell.text.lower() for cell in table.rows[0].cells]
-                # Tabela de EPI
                 if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h for h in hdr):
                     for row in table.rows[1:]:
                         cells = row.cells
@@ -134,171 +233,8 @@ def parse_pre_relatorio(doc):
                         desc = desc.replace("**", "").replace("*", "")
                         if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
                             epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
-                
-                # Tabela CNIS Extrajudicial
-                elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
-                    for row in table.rows[1:]:
-                        if len(row.cells) >= 2:
-                            emp_text = row.cells[1].text.strip()
-                            if emp_text and "AGRUPAMENTO" not in emp_text.upper():
-                                empresas_cnis.append(emp_text)
 
-            # Extrai o texto contido na tabela para ser lido normalmente pela Regex
-            for row in table.rows:
-                row_text = " : ".join([c.text.strip() for c in row.cells if c.text.strip()])
-                if row_text:
-                    linhas.append(row_text)
-
-    if epis_extraidos:
-        dados["quadro_epis"] = epis_extraidos
-
-    # Junta tudo num bloco contínuo
-    texto = "\n".join(linhas).replace("**", "").replace("*", "")
-
-    # FUNÇÕES BLINDADAS DE EXTRAÇÃO
-    def get_single(padrao):
-        # Busca a chave, ignora espaços e (:) ou (|), e extrai tudo até o fim da linha
-        m = re.search(r"(?:" + padrao + r")[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
-        if m:
-            v = m.group(1).replace("_", "").strip()
-            # Remove completamente o aviso de informação não localizada e mantém o resto se existir
-            v_limpo = re.sub(r"\[informação.*?\]", "", v, flags=re.IGNORECASE).strip()
-            if v_limpo:
-                return v_limpo
-        return ""
-
-    def get_multi(padrao, next_sections, stop_on_number=True):
-        # Desabilita a trava numérica quando estivermos lendo os Quesitos e blinda contra Bullet Points (•, -, *)
-        if stop_on_number:
-            lookahead = r"(?=\n[\s]*[•\-\*]?[\s]*\d+\.\s*|(?:" + "|".join(next_sections) + r")|$)"
-        else:
-            lookahead = r"(?=(?:" + "|".join(next_sections) + r")|$)"
-            
-        m = re.search(r"(?:" + padrao + r")[\s]*[:|]?[\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
-        if m:
-            v = m.group(1).replace("_", "").strip()
-            # Retira as sujeiras do Word em vez de anular todo o bloco
-            v_limpo = re.sub(r"\[informação.*?\]", "", v, flags=re.IGNORECASE).strip()
-            if v_limpo:
-                return v_limpo
-        return ""
-
-    # DADOS SIMPLES (Identificação e Contrato)
-    dados["processo_num"] = get_single(r"Número do Processo|Processo")
-    dados["orgao_julgador"] = get_single(r"Órgão Julgador / Vara|Órgão Julgador")
-    dados["data_autuacao"] = get_single(r"Data de Autuação.*?Ajuizamento.*?|Data de Autuação")
-    dados["valor_causa"] = get_single(r"Valor da Causa")
-    dados["rito_processual"] = get_single(r"Rito Processual")
-
-    # Reclamante com tratamento anti-sujeira
-    rec = get_single(r"Reclamante \(Autor/Autora\)|Reclamante|Nome do Segurado|Nome")
-    if rec:
-        m_cpf = re.search(r"(?:CPF|NIT|PIS)[\s:]*([\d\.\-\/]+)", rec, re.IGNORECASE)
-        if m_cpf:
-            dados["reclamante_cpf"] = m_cpf.group(1)
-            rec = re.sub(r"\((?:CPF|NIT|PIS).*?\)", "", rec, flags=re.IGNORECASE).strip()
-        dados["reclamante_nome"] = rec
-    if not dados.get("reclamante_cpf"):
-        dados["reclamante_cpf"] = get_single(r"CPF/NIT|CPF / NIT / PIS|CPF")
-
-    # Advogados (Puxa os dois na sequência)
-    advs = re.findall(r"Advogados[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
-    if len(advs) >= 1: dados["reclamante_adv"] = advs[0].replace("_", "").strip()
-    if len(advs) >= 2: dados["reclamada_adv"] = advs[1].replace("_", "").strip()
-
-    # Reclamada
-    recd = get_single(r"Reclamada \(Ré/Empresa\)|Reclamada \(Ré / Empresa\)|Reclamada|Razão Social da Empresa / Tomador|Razão Social")
-    if recd:
-        m_cnpj = re.search(r"CNPJ[\s:]*([\d\.\-\/]+)", recd, re.IGNORECASE)
-        if m_cnpj:
-            dados["reclamada_cnpj"] = m_cnpj.group(1)
-            recd = re.sub(r"\(?CNPJ.*?\)?", "", recd, flags=re.IGNORECASE).strip()
-        dados["reclamada_nome"] = recd.strip(" ()-")
-    if not dados.get("reclamada_cnpj"):
-        dados["reclamada_cnpj"] = get_single(r"CNPJ da Empresa|CNPJ")
-
-    if not dados.get("reclamada_nome") and empresas_cnis:
-        dados["reclamada_nome"] = empresas_cnis[-1]
-
-    # Contrato
-    dados["data_admissao"] = get_single(r"Data de Admissão|Período de Trabalho.*?")
-    dados["status_contrato"] = get_single(r"Status do Contrato.*?")
-    dados["periodo_imprescrito"] = get_single(r"Período Imprescrito.*?")
-    cargo = get_single(r"Cargo\(s\) / Função\(ões\)|Cargo\(s\)|Profissão / Cargo Avaliado|Profissão / Cargo")
-    if cargo:
-        dados["cargos"] = cargo
-        dados["profissao_cargo"] = cargo
-        
-    dados["segurado_nascimento"] = get_single(r"Data de Nascimento")
-    dados["setor"] = get_single(r"Setor.*?Lotação.*?")
-    dados["ultima_remuneracao"] = get_single(r"Última Remuneração.*?")
-    dados["objeto_pericia"] = get_single(r"Objeto da Perícia|Objeto de Análise / Perícia|Objetivo")
-
-    # LISTA ATUALIZADA COM OS TÍTULOS E BULLET POINTS
-    paradas = [
-        r"Agentes Nocivos", r"Agentes Físicos", r"Agentes Químicos", r"Agentes Biológicos",
-        r"Pedidos Técnicos", r"Preliminares Periciais", r"Defesa de Mérito", 
-        r"Fase Processual", r"Data da Vistoria", r"Local / Endereço", 
-        r"Análise do LTCAT", r"LTCAT", 
-        r"Laudo de Insalubridade", r"LAUDO DE INSALUBRIDADE.*?|LAUDO DE INSALUBRIDADE / PERICULOSIDADE.*?", 
-        r"Análise do PPP", r"PPP \(Perfil Profissiográfico Previdenciário\)", r"PPP", 
-        r"Análise do PGR", r"PGR / PPRA / PCMAT", r"PGR / PPRA", r"PGR", 
-        r"Ordens de Serviço", r"ORDENS DE SERVIÇO \(OS\) / TREINAMENTOS", r"ORDENS DE SERVIÇO", 
-        r"ASOs / PCMSO", r"ASOs", 
-        r"Outros Documentos Relevantes", r"Outros Documentos", 
-        r"Síntese e Análise Crítica de EPIs", r"Síntese e Análise", 
-        r"\n[\s]*[•\-\*]?[\s]*9\.1", r"\n[\s]*[•\-\*]?[\s]*9\.2", r"\n[\s]*[•\-\*]?[\s]*9\.3", r"\n[\s]*[•\-\*]?[\s]*10\.", 
-        r"Pessoas Presentes", r"Informações prestadas", r"Medições Realizadas"
-    ]
-    
-    dados["atividades_inicial"] = get_multi(r"Atividades Descritas.*?|Atividades Típicas.*?|Relato das Atividades.*?|Relato Inicial.*?", paradas)
-    if not dados.get("relato_inicial"): dados["relato_inicial"] = dados.get("atividades_inicial", "")
-
-    dados["agentes_alegados"] = get_multi(r"Agentes Nocivos.*?Riscos Alegados", paradas)
-    dados["apr_fisicos"] = get_multi(r"Agentes Físicos.*?", paradas)
-    dados["apr_quimicos"] = get_multi(r"Agentes Químicos.*?", paradas)
-    dados["apr_biologicos"] = get_multi(r"Agentes Biológicos.*?", paradas)
-    dados["enquadramento_legal_prev"] = get_multi(r"(?:Possível )?Enquadramento Legal.*?", paradas)
-
-    dados["pedidos_tecnicos"] = get_multi(r"Pedidos Técnicos.*?", paradas)
-    dados["preliminares_periciais"] = get_multi(r"Preliminares Periciais.*?", paradas)
-    dados["defesa_merito_sst"] = get_multi(r"Defesa de Mérito.*?", paradas)
-    dados["fase_processual"] = get_single(r"Fase Processual Atual.*?")
-    
-    dh = get_single(r"Data e Horário da Vistoria")
-    if dh and "às" in dh:
-        pts = dh.split("às")
-        dados["campo_data"] = pts[0].strip()
-        dados["campo_horario"] = pts[1].strip()
-    elif dh:
-        dados["campo_data"] = dh
-    else:
-        dados["campo_data"] = get_single(r"Data da Vistoria")
-        dados["campo_horario"] = get_single(r"Horário.*?")
-        
-    dados["local_diligencia"] = get_single(r"Local / Endereço.*?")
-
-    dados["doc_ltcat"] = get_multi(r"Análise do LTCAT|LTCAT", paradas)
-    dados["doc_laudo"] = get_multi(r"Análise de Laudos.*?|LAUDO DE INSALUBRIDADE / PERICULOSIDADE \(Próprio ou Paradigma\)|LAUDO DE INSALUBRIDADE / PERICULOSIDADE|LAUDO DE INSALUBRIDADE", paradas)
-    dados["doc_ppp"] = get_multi(r"Análise do PPP.*?|PPP \(Perfil Profissiográfico Previdenciário\)|PPP", paradas)
-    dados["doc_pgr"] = get_multi(r"Análise do PGR.*?|PGR / PPRA / PCMAT|PGR / PPRA|PGR", paradas)
-    dados["doc_os"] = get_multi(r"Ordens de Serviço.*?|ORDENS DE SERVIÇO \(OS\) / TREINAMENTOS|ORDENS DE SERVIÇO", paradas)
-    dados["doc_asos"] = get_multi(r"ASOs / PCMSO|ASOs", paradas)
-    dados["doc_outros"] = get_multi(r"Outros Documentos Relevantes|Outros Documentos", paradas)
-
-    dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs", paradas)
-    
-    # EXTRAÇÃO DE QUESITOS BLINDADA CONTRA BULLET POINTS
-    paradas_quesitos = [
-        r"\n[\s]*[•\-\*]?[\s]*9\.2", 
-        r"\n[\s]*[•\-\*]?[\s]*9\.3", 
-        r"\n[\s]*[•\-\*]?[\s]*10\.", 
-        r"\nPessoas Presentes", 
-        r"\n[\s]*[•\-\*]?[\s]*10\. LEVANTAMENTOS DE CAMPO"
-    ]
-    dados["quesitos_juizo"] = get_multi(r"9\.1\.[\s]*Quesitos do Juízo", paradas_quesitos, stop_on_number=False)
-    dados["quesitos_autor"] = get_multi(r"9\.2\.[\s]*Quesitos do Reclamante", paradas_quesitos, stop_on_number=False)
-    dados["quesitos_reu"] = get_multi(r"9\.3\.[\s]*Quesitos da Reclamada", paradas_quesitos, stop_on_number=False)
+    dados["quadro_epis"] = epis_extraidos
 
     return dados
 
@@ -481,7 +417,7 @@ if opcao == "➕ Novo Processo / Caso":
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📥 Importar Documento Base (.docx)")
-    arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
+    arquivo_importado = st.file_uploader("Selecione o arquivo Word gerado pela IA (utilizando as Tags Ocultas)", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
     
     if arquivo_importado is not None:
         try:
@@ -489,7 +425,6 @@ if opcao == "➕ Novo Processo / Caso":
             dados_extraidos = parse_pre_relatorio(doc_ext)
             st.session_state.parsed_data = dados_extraidos
             
-            # INJEÇÃO DIRETA NO ESTADO: Evita que o Streamlit ofusque o valor recém extraído
             key_num = f"novo_num_{st.session_state.uploader_key}"
             key_nome = f"novo_nome_{st.session_state.uploader_key}"
             key_emp = f"novo_emp_{st.session_state.uploader_key}"
@@ -498,7 +433,7 @@ if opcao == "➕ Novo Processo / Caso":
             st.session_state[key_nome] = dados_extraidos.get("reclamante_nome", "") or ""
             st.session_state[key_emp] = dados_extraidos.get("reclamada_nome", "") or ""
             
-            st.success("Documento lido e mapeado com sucesso!")
+            st.success("🤖 Documento lido 100% com sucesso pelo Motor de Extração por Tags!")
         except Exception as e:
             st.error(f"Erro ao ler o arquivo: {e}")
 
@@ -592,7 +527,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     st.markdown("#### Avaliação de Extemporaneidade (Art. 279, IN 128/2022):")
                     p_atual["extemp_layout"] = st.checkbox("Houve mudança no layout ou organização do ambiente?", value=p_atual.get("extemp_layout", False), key=f"p2_el_{processo_id_selecionado}")
                     p_atual["extemp_maquinas"] = st.checkbox("Houve substituição de máquinas ou equipamentos?", value=p_atual.get("extemp_maquinas", False), key=f"p2_em_{processo_id_selecionado}")
-                    p_atual["extemp_epc"] = st.checkbox("Houve alteração nas technologies de proteção coletiva (EPC)?", value=p_atual.get("extemp_epc", False), key=f"p2_ee_{processo_id_selecionado}")
+                    p_atual["extemp_epc"] = st.checkbox("Houve alteração nas tecnologias de proteção coletiva (EPC)?", value=p_atual.get("extemp_epc", False), key=f"p2_ee_{processo_id_selecionado}")
                     
                     v_ext = p_atual.get("extemp_justificativa", "")
                     p_atual["extemp_justificativa"] = st.text_area("Fundamentação Técnica da Equivalência (Extemporaneidade)", value=v_ext, height=calcula_altura(v_ext, 100), key=f"p2_ej_{processo_id_selecionado}")
@@ -1028,7 +963,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                 r_title.bold = True
                 r_title.font.name = 'Abadi'
                 r_title.font.size = Pt(11)
-                if not text: text = "[Informação/Documento não localizado nos autos anexados]"
+                if not text: text = "[Informação não localizada]"
                 for linha in text.split("\n"):
                     if linha.strip():
                         p_text = doc_obj.add_paragraph()
@@ -1337,3 +1272,181 @@ elif opcao == "📄 Gerar Documento Word Final":
                 file_name=f"Documento_Oficial_{p.get('reclamante_nome','Caso').replace(' ','_')}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
+```Excelente solicitação. Para que o nosso aplicativo Streamlit (que extrai as informações via Expressões Regulares - Regex) funcione de forma impecável, a "comunicação" entre a Inteligência Artificial (ChatGPT, Claude, Gemini) que analisa os PDFs e o código em Python precisa ser **padronizada e rígida, como um banco de dados**.
+
+O problema de *prompts* que geram textos contínuos ou listas tradicionais é que a IA os preenche usando a formatação invisível do Markdown (como subtítulos `###`, ou listas com marcadores `•` e `-`). Quando o Word renderiza o arquivo `.docx`, ele insere tabulações e símbolos automáticos que "cegam" o seu código Python, fazendo com que ele não consiga separar corretamente um bloco de quesitos do outro.
+
+A **solução definitiva** para isso é abandonar a leitura baseada em títulos e passar a usar **Extração Baseada em Tags Ocultas** (ex: `[START_QUESITOS_AUTOR]`). 
+
+Abaixo, forneço o **Novo Prompt Mestre** (para você usar nas IAs) e o **Novo Código Completo** (para você atualizar o seu aplicativo).
+
+---
+
+### 1. O NOVO PROMPT MESTRE (Para a IA)
+
+Você deve copiar o bloco abaixo e colar na sua Inteligência Artificial toda vez que for analisar um novo processo. Ele é universal: serve tanto para processos trabalhistas quanto para demandas extrajudiciais de previdenciário (como análise de CNIS para PPP).
+
+**COPIE E COLE NA IA:**
+
+```text
+Atue como um Especialista em Engenharia e Medicina de Segurança do Trabalho e Assistente Jurídico de Inteligência Artificial.
+
+Em anexo, estou enviando documentos de um processo (Petições, Laudos, Contestação, Quesitos, etc.) ou documentos previdenciários extrajudiciais (PPP, CNIS). O usuário atuará como Profissional Técnico (Perito do Juízo, Assistente Técnico ou Consultor Extrajudicial).
+
+Sua tarefa é analisar os documentos, cruzar as informações técnicas de SST e gerar um relatório estruturado.
+
+🚨 REGRAS CRÍTICAS DE PROGRAMAÇÃO (O DESCUMPRIMENTO CAUSARÁ ERRO NO SISTEMA):
+1. O texto que você gerar será exportado para um arquivo .DOCX e importado por um software automatizado via Regex. 
+2. Para que o software leia os dados, você DEVE OBRIGATORIAMENTE formatar sua resposta utilizando as TAGS ESTRUTURAIS EXATAS listadas abaixo.
+3. NÃO utilize formatação Markdown (negrito, itálico, títulos H1/H2) ou marcadores de lista (*, -, •) nas Tags ou nos Quesitos. Transcreva os textos e quesitos como parágrafos de texto puro.
+4. Se uma informação não existir nos autos, preencha o interior da tag OBRIGATORIAMENTE com a frase: [Informação não localizada]
+5. Se for um caso Extrajudicial, preencha as tags previdenciárias (APR_FISICOS, NASCIMENTO, etc) e coloque "N/A" nas tags judiciais. Se for Judicial, preencha as judiciais e coloque "N/A" nas puramente extrajudiciais.
+
+=========================================
+ESTRUTURA OBRIGATÓRIA (COPIE AS TAGS EXATAMENTE COMO ESTÃO E PREENCHA NO MEIO):
+
+[START_MODULO]
+(Inserir: "Perícia Judicial Trabalhista" ou "Laudo Extrajudicial Previdenciário")
+[END_MODULO]
+
+[START_PROCESSO_NUM]
+(Inserir Número do Processo ou "Extrajudicial")
+[END_PROCESSO_NUM]
+
+[START_ORGAO_JULGADOR]
+[END_ORGAO_JULGADOR]
+
+[START_DATA_AUTUACAO]
+[END_DATA_AUTUACAO]
+
+[START_VALOR_CAUSA]
+[END_VALOR_CAUSA]
+
+[START_RITO]
+[END_RITO]
+
+[START_RECLAMANTE_NOME]
+[END_RECLAMANTE_NOME]
+
+[START_RECLAMANTE_CPF]
+[END_RECLAMANTE_CPF]
+
+[START_NASCIMENTO]
+[END_NASCIMENTO]
+
+[START_RECLAMANTE_ADV]
+[END_RECLAMANTE_ADV]
+
+[START_RECLAMADA_NOME]
+[END_RECLAMADA_NOME]
+
+[START_RECLAMADA_CNPJ]
+[END_RECLAMADA_CNPJ]
+
+[START_RECLAMADA_ADV]
+[END_RECLAMADA_ADV]
+
+[START_DATA_ADMISSAO]
+[END_DATA_ADMISSAO]
+
+[START_STATUS_CONTRATO]
+[END_STATUS_CONTRATO]
+
+[START_PERIODO_IMPRESCRITO]
+(Em casos judiciais, calcule e informe o período de 5 anos retroativos ao ajuizamento)
+[END_PERIODO_IMPRESCRITO]
+
+[START_CARGOS]
+[END_CARGOS]
+
+[START_SETOR]
+[END_SETOR]
+
+[START_ULTIMA_REMUNERACAO]
+[END_ULTIMA_REMUNERACAO]
+
+[START_OBJETO_PERICIA]
+[END_OBJETO_PERICIA]
+
+[START_RELATO_INICIAL]
+(Resumo das atividades descritas na inicial ou pelo segurado)
+[END_RELATO_INICIAL]
+
+[START_AGENTES_ALEGADOS]
+[END_AGENTES_ALEGADOS]
+
+[START_APR_FISICOS]
+[END_APR_FISICOS]
+
+[START_APR_QUIMICOS]
+[END_APR_QUIMICOS]
+
+[START_APR_BIOLOGICOS]
+[END_APR_BIOLOGICOS]
+
+[START_ENQUADRAMENTO]
+[END_ENQUADRAMENTO]
+
+[START_PEDIDOS_TECNICOS]
+[END_PEDIDOS_TECNICOS]
+
+[START_PRELIMINARES]
+[END_PRELIMINARES]
+
+[START_DEFESA_MERITO]
+[END_DEFESA_MERITO]
+
+[START_FASE_PROCESSUAL]
+[END_FASE_PROCESSUAL]
+
+[START_DATA_VISTORIA]
+[END_DATA_VISTORIA]
+
+[START_HORARIO_VISTORIA]
+[END_HORARIO_VISTORIA]
+
+[START_LOCAL_VISTORIA]
+[END_LOCAL_VISTORIA]
+
+[START_DOC_LTCAT]
+[END_DOC_LTCAT]
+
+[START_DOC_LAUDO]
+[END_DOC_LAUDO]
+
+[START_DOC_PPP]
+[END_DOC_PPP]
+
+[START_DOC_PGR]
+[END_DOC_PGR]
+
+[START_DOC_OS]
+[END_DOC_OS]
+
+[START_DOC_ASOS]
+[END_DOC_ASOS]
+
+[START_DOC_OUTROS]
+[END_DOC_OUTROS]
+
+[START_QUADRO_EPIS]
+(Construa UMA tabela de EPIs no formato texto delimitado por pipes "|". Exemplo: Luva | 12345 | 10/10/23 | C.A Vencido)
+[END_QUADRO_EPIS]
+
+[START_SINTESE_EPIS]
+[END_SINTESE_EPIS]
+
+[START_QUESITOS_JUIZO]
+(Transcreva todas as perguntas na íntegra, texto plano, não use "•" ou marcadores de lista)
+[END_QUESITOS_JUIZO]
+
+[START_QUESITOS_AUTOR]
+(Transcreva todas as perguntas na íntegra, texto plano, não use "•" ou marcadores de lista)
+[END_QUESITOS_AUTOR]
+
+[START_QUESITOS_REU]
+(Transcreva todas as perguntas na íntegra, texto plano, não use "•" ou marcadores de lista)
+[END_QUESITOS_REU]
+
+=========================================
+Ao final, utilize Python para exportar as tags e seus valores para um arquivo .DOCX e libere para download.
