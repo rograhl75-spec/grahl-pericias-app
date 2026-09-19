@@ -43,6 +43,7 @@ from grahl_app.utils import (
     generate_next_process_id,
     normalize_epi_list,
     normalize_process_data,
+    pending_identity_fields,
     remover_acentos,
     sanitize_output_filename,
     validate_process_data,
@@ -99,13 +100,13 @@ def trocar_menu(acao: str) -> None:
 
 def save_with_feedback(process_id: str, process_data: dict, success_message: str) -> bool:
     normalized = normalize_process_data(process_data)
-    validation = validate_process_data(normalized, for_generation=False)
+    missing_fields = pending_identity_fields(normalized)
     try:
         save_process(process_id, normalized)
     except RuntimeError as exc:
         st.error(str(exc))
         return False
-    show_save_feedback(success_message, validation.missing_required_fields)
+    show_save_feedback(success_message, missing_fields)
     return True
 
 
@@ -225,12 +226,12 @@ if opcao == MENU_NEW:
     st.markdown("#### 📥 Importar Documento Base (.docx)")
     arquivo_importado = st.file_uploader("Selecione o arquivo Word para preenchimento automático", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
     if arquivo_importado is not None:
+        st.session_state.parsed_data = {}
         try:
             doc_ext = Document(arquivo_importado)
             st.session_state.parsed_data = parse_pre_relatorio(doc_ext)
             st.success("Documento lido e mapeado com sucesso!")
         except (PackageNotFoundError, BadZipFile, ValueError) as exc:
-            st.session_state.parsed_data = {}
             st.error(f"Erro ao ler o arquivo Word informado: {exc}")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -270,7 +271,7 @@ if opcao == MENU_NEW:
                 st.session_state.uploader_key += 1
                 st.session_state.processo_ativo = novo_id
                 st.session_state.menu_opcao = MENU_DATA
-                show_save_feedback(f"✅ Caso {novo_id} criado com sucesso!", validate_process_data(p_novo, for_generation=True).missing_required_fields)
+                show_save_feedback(f"✅ Caso {novo_id} criado com sucesso!", pending_identity_fields(p_novo))
                 st.rerun()
 
 elif opcao == MENU_DATA:

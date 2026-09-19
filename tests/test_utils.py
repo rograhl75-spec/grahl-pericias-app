@@ -5,7 +5,7 @@ from PIL import Image
 from grahl_app.documents import build_document_bytes
 from grahl_app.parser import parse_pre_relatorio
 from grahl_app.photos import build_photo_entry, decode_photo_base64, normalize_photo_entry, photo_exists, photo_identity_hash
-from grahl_app.utils import generate_next_process_id, normalize_process_data, sanitize_output_filename, validate_process_data
+from grahl_app.utils import generate_next_process_id, normalize_process_data, pending_identity_fields, sanitize_output_filename, validate_process_data
 
 
 def test_generate_next_process_id_ignores_malformed_ids():
@@ -27,10 +27,12 @@ def test_normalize_process_data_merges_defaults_without_shared_lists():
 def test_validate_process_data_allows_partial_save_but_flags_generation_requirements():
     permissive = validate_process_data({"reclamante_nome": "Fulano"}, for_generation=False)
     result = validate_process_data({"reclamante_nome": "Fulano"}, for_generation=True)
+    pending = pending_identity_fields({"reclamante_nome": "Fulano"})
 
     assert permissive.is_valid
     assert not result.is_valid
     assert set(result.missing_required_fields) == {"reclamada_nome", "processo_num"}
+    assert set(pending) == {"reclamada_nome", "processo_num"}
 
 
 def test_parse_pre_relatorio_extracts_multiline_fields_and_epis():

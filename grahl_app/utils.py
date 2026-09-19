@@ -178,12 +178,17 @@ def validate_process_data(data: dict | None, *, for_generation: bool = False) ->
     if not for_generation:
         return ValidationResult(missing_required_fields=())
 
+    missing = pending_identity_fields(normalized)
+    return ValidationResult(missing_required_fields=missing)
+
+
+def pending_identity_fields(data: dict | None) -> tuple[str, ...]:
+    normalized = normalize_process_data(data)
     module = normalized.get("modulo_atuacao") or ""
     required_fields = REQUIRED_FIELDS_FOR_GENERATION["default"]
     if module == MODULE_PREVIDENCIARIO:
         required_fields = REQUIRED_FIELDS_FOR_GENERATION[MODULE_PREVIDENCIARIO]
-    missing = tuple(field for field in required_fields if not normalize_multiline_text(normalized.get(field, "")))
-    return ValidationResult(missing_required_fields=missing)
+    return tuple(field for field in required_fields if not normalize_multiline_text(normalized.get(field, "")))
 
 
 def format_missing_field_labels(fields: Iterable[str]) -> list[str]:

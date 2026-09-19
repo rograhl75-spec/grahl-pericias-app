@@ -14,7 +14,10 @@ def get_firestore_client():
 
     try:
         firebase_config = dict(st.secrets["firebase"])
-        cred = credentials.Certificate(firebase_config)
+        try:
+            cred = credentials.Certificate(firebase_config)
+        except ValueError as exc:
+            raise RuntimeError(f"Conteúdo de `st.secrets['firebase']` inválido: {exc}") from exc
         app = firebase_admin.initialize_app(cred)
         return firestore.client(app=app)
     except KeyError:
