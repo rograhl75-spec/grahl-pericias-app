@@ -22,6 +22,11 @@ def clear_process_cache() -> None:
     load_processes.clear()
 
 
+def fetch_process_ids_uncached() -> list[str]:
+    db = get_firestore_client()
+    return [doc.id for doc in db.collection(COLLECTION_PROCESSOS).stream()]
+
+
 def save_process(process_id: str, process_data: dict) -> None:
     db = get_firestore_client()
     try:
@@ -43,7 +48,7 @@ def delete_process(process_id: str) -> None:
 def create_process_with_auto_id(process_data: dict, *, max_attempts: int = 5) -> str:
     db = get_firestore_client()
     for _ in range(max_attempts):
-        current_ids = list(load_processes().keys())
+        current_ids = fetch_process_ids_uncached()
         process_id = generate_next_process_id(current_ids)
         try:
             db.collection(COLLECTION_PROCESSOS).document(process_id).create(normalize_process_data(process_data))

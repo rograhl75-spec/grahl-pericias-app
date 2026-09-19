@@ -18,11 +18,8 @@ def get_firestore_client():
         app = firebase_admin.initialize_app(cred)
         return firestore.client(app=app)
     except KeyError:
-        st.error("Firebase não configurado corretamente. Verifique `st.secrets['firebase']`.")
-        st.stop()
+        raise RuntimeError("Firebase não configurado corretamente. Verifique `st.secrets['firebase']`.") from None
     except ValueError as exc:
-        st.error(f"Erro ao inicializar o Firebase: {exc}")
-        st.stop()
+        raise RuntimeError(f"Erro ao inicializar o Firebase: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Falha ao conectar ao Firebase: {exc}")
-        st.stop()
+        raise RuntimeError(f"Falha ao conectar ao Firebase: {exc}") from exc

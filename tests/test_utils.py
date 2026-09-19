@@ -1,3 +1,4 @@
+import pytest
 from docx import Document
 
 from grahl_app.parser import parse_pre_relatorio
@@ -64,6 +65,8 @@ def test_photo_hash_helpers_detect_duplicates_and_invalid_base64():
     assert photo_identity_hash(b"fake-image-bytes") == entry["hash"]
     assert photo_exists([entry], duplicate)
     assert decode_photo_base64(entry["base64"]) == b"fake-image-bytes"
+    with pytest.raises(ValueError):
+        decode_photo_base64("not-base64!!")
 
 
 def test_sanitize_output_filename_removes_invalid_characters():

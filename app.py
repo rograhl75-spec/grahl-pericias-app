@@ -148,7 +148,11 @@ def render_logo_and_title() -> None:
 
 
 render_logo_and_title()
-db_processos = load_processes()
+try:
+    db_processos = load_processes()
+except RuntimeError as exc:
+    st.error(str(exc))
+    st.stop()
 
 st.sidebar.markdown("<h2 style='color: #FFFFFF; font-size: 1.3rem; margin-bottom: 1rem;'>📁 Painel de Controle</h2>", unsafe_allow_html=True)
 for acao in MENU_OPTIONS:
