@@ -104,11 +104,12 @@ def calcula_altura(texto, min_h):
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
     return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
-# === MOTOR DE EXTRAÇÃO LIMPO (REGEX) ===
+# === NOVO MOTOR INTELIGENTE DE LEITURA E MAPA DE DADOS ===
 def parse_pre_relatorio(doc):
     dados = {}
     linhas = []
     
+    # 1. Extrai todo o texto dos parágrafos
     for p in doc.paragraphs:
         if p.text.strip():
             linhas.append(p.text.strip())
@@ -116,9 +117,11 @@ def parse_pre_relatorio(doc):
     empresas_cnis = []
     epis_extraidos = []
     
+    # 2. Extração Segura das Tabelas (Ignorando Tabelas Invisíveis de Formatação)
     for table in doc.tables:
         if len(table.rows) > 0:
             hdr = [cell.text.lower() for cell in table.rows[0].cells]
+            # Identifica Tabela de EPI
             if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h for h in hdr):
                 for row in table.rows[1:]:
                     cells = row.cells
@@ -129,6 +132,7 @@ def parse_pre_relatorio(doc):
                     desc = desc.replace("**", "").replace("*", "")
                     if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
                         epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
+            # Identifica Tabela do CNIS (Extrajudicial)
             elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
                 for row in table.rows[1:]:
                     if len(row.cells) >= 2:
@@ -136,56 +140,49 @@ def parse_pre_relatorio(doc):
                         if emp_text and "AGRUPAMENTO" not in emp_text.upper():
                             empresas_cnis.append(emp_text)
 
+            # Transforma a tabela num formato legível para os campos simples (Ex: "Número do Processo | ATOrd...")
+            for row in table.rows:
+                row_text = " | ".join([c.text.strip() for c in row.cells if c.text.strip()])
+                if row_text:
+                    linhas.append(row_text)
+
     if epis_extraidos:
         dados["quadro_epis"] = epis_extraidos
 
+    # 3. Bloco Mestre de Texto
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
 
-    labels_to_break = [
-        "Número do Processo", "Órgão Julgador / Vara", "Órgão Julgador", "Vara", 
-        "Data de Autuação", "Ajuizamento", "Valor da Causa", "Rito Processual", 
-        "Reclamante \\(Autor/Autora\\)", "Reclamante", "Nome do Segurado",
-        "CPF/NIT", "CPF", "CNPJ", "Data de Nascimento", "Reclamada \\(Ré/Empresa\\)", 
-        "Reclamada \\(Ré / Empresa\\)", "Reclamada", "Empresa / Tomador", "Data de Admissão", 
-        "Status do Contrato", "Período Imprescrito", "Cargo\\(s\\) / Função\\(ões\\)", 
-        "Profissão / Cargo", "Setor / Lotação / Local", "Última Remuneração", 
-        "Objeto da Perícia", "Atividades Descritas", "Atividades Típicas",
-        "Relato Inicial", "Agentes Nocivos / Riscos Alegados", "Agentes Nocivos", 
-        "Agentes Físicos", "Agentes Químicos", "Agentes Biológicos", 
-        "Enquadramento Legal", "Pedidos Técnicos", "Preliminares Periciais", 
-        "Defesa de Mérito", "Fase Processual Atual", "Fase Processual", "Data da Vistoria",
-        "Horário", "Local / Endereço", "LTCAT", "Laudo de Insalubridade", "PPP", 
-        "PGR / PPRA / PCMAT", "PGR", "Ordens de Serviço", "ASOs / PCMSO", "ASOs", 
-        "Outros Documentos", "Síntese e Análise", "9\\.1\\. Quesitos", "9\\.2\\. Quesitos", 
-        "9\\.3\\. Quesitos"
-    ]
-    
-    for label in labels_to_break:
-        pattern = r"(?<!\n)(" + label + r"[\s]*:)"
-        texto = re.sub(pattern, r"\n\1", texto, flags=re.IGNORECASE)
-
+    # 4. Função Blindada de Busca e Extração
     def extrair_campo(regex_pattern, multiline=False):
         if not multiline:
-            m = re.search(r"\n?" + regex_pattern + r"[\s]*:[\s]*([^\n]+)", texto, re.IGNORECASE)
+            # O separador aceita tanto os dois-pontos (:) quanto as colunas das tabelas do Word (|)
+            m = re.search(regex_pattern + r"[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
             if m:
                 val = m.group(1).replace("_", "").strip()
                 return val if "[informação" not in val.lower() and val else ""
             return ""
         else:
-            lookahead = r"(?=\n[A-ZÀ-Ú0-9][^\n]{2,80}:|\n\d+\.\s|$)"
-            m = re.search(r"\n?" + regex_pattern + r"[\s]*:[\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
+            # Lookahead: A leitura NUNCA para a não ser que encontre o Título Mestre exato de outra seção.
+            lookahead = r"(?=\n\d+\.\s*(?:IDENTIFICAÇÃO|QUALIFICAÇÃO|DADOS|SÍNTESE|STATUS|ANÁLISE|QUADRO|QUESITOS|LEVANTAMENTOS|REGISTROS|CONCLUSÃO)|$)"
+            # Se for um quesito, ele para no próximo quesito ou na próxima Seção Mestre
+            if "Quesitos" in regex_pattern:
+                lookahead = r"(?=\n9\.\d\.\s*Quesitos|\n\d+\.\s*(?:IDENTIFICAÇÃO|QUALIFICAÇÃO|DADOS|SÍNTESE|STATUS|ANÁLISE|QUADRO|QUESITOS|LEVANTAMENTOS|REGISTROS|CONCLUSÃO)|$)"
+            
+            m = re.search(regex_pattern + r"[\s]*[:|][\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
             if m:
                 val = m.group(1).replace("_", "").strip()
                 return val if "[informação" not in val.lower() and val else ""
             return ""
 
+    # Extração Simples (Funciona com Linhas e Tabelas)
     dados["processo_num"] = extrair_campo(r"(?:Número do Processo|Processo)")
     dados["orgao_julgador"] = extrair_campo(r"(?:Órgão Julgador / Vara|Órgão Julgador|Vara)")
     dados["data_autuacao"] = extrair_campo(r"(?:Data de Autuação.*?Ajuizamento.*?|Data de Autuação)")
     dados["valor_causa"] = extrair_campo(r"Valor da Causa")
     dados["rito_processual"] = extrair_campo(r"Rito Processual")
 
-    rec_linha = extrair_campo(r"(?:Reclamante.*?Autor.*?|Nome do Segurado|Nome)")
+    # Nome e CPF (Mesma linha ou linhas separadas)
+    rec_linha = extrair_campo(r"(?:Reclamante \(Autor/Autora\)|Reclamante|Nome do Segurado|Nome)")
     if rec_linha:
         m_cpf = re.search(r"(?:CPF|NIT|PIS)[\s:]*([\d\.\-\/]+)", rec_linha, re.IGNORECASE)
         if m_cpf:
@@ -194,19 +191,21 @@ def parse_pre_relatorio(doc):
         dados["reclamante_nome"] = rec_linha
         
     if not dados.get("reclamante_cpf"):
-        dados["reclamante_cpf"] = extrair_campo(r"(?:CPF/NIT|CPF)")
+        dados["reclamante_cpf"] = extrair_campo(r"(?:CPF/NIT|CPF / NIT / PIS|CPF)")
 
-    m_advs = re.findall(r"\nAdvogados\s*:\s*([^\n]+)", texto, re.IGNORECASE)
+    # Puxa até 2 advogados na sequência
+    m_advs = re.findall(r"Advogados[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
     if len(m_advs) >= 1: dados["reclamante_adv"] = m_advs[0].replace("_", "").strip()
     if len(m_advs) >= 2: dados["reclamada_adv"] = m_advs[1].replace("_", "").strip()
 
-    recd_linha = extrair_campo(r"(?:Reclamada.*?Empresa.*?|Razão Social.*?)")
+    # Reclamada e CNPJ
+    recd_linha = extrair_campo(r"(?:Reclamada \(Ré/Empresa\)|Reclamada \(Ré / Empresa\)|Reclamada|Razão Social da Empresa / Tomador|Razão Social)")
     if recd_linha:
         m_cnpj = re.search(r"(?:CNPJ)[\s:]*([\d\.\-\/]+)", recd_linha, re.IGNORECASE)
         if m_cnpj:
             dados["reclamada_cnpj"] = m_cnpj.group(1)
-            recd_linha = re.sub(r"\(CNPJ.*?\)", "", recd_linha, flags=re.IGNORECASE).strip()
-        dados["reclamada_nome"] = recd_linha
+            recd_linha = re.sub(r"\(?CNPJ.*?\)?", "", recd_linha, flags=re.IGNORECASE).strip()
+        dados["reclamada_nome"] = recd_linha.strip(" ()-")
         
     if not dados.get("reclamada_cnpj"):
         dados["reclamada_cnpj"] = extrair_campo(r"(?:CNPJ da Empresa|CNPJ)")
@@ -218,7 +217,7 @@ def parse_pre_relatorio(doc):
     dados["status_contrato"] = extrair_campo(r"Status do Contrato.*?")
     dados["periodo_imprescrito"] = extrair_campo(r"Período Imprescrito.*?")
     
-    cargo = extrair_campo(r"(?:Cargo\(s\).*?Função.*?|Profissão.*?Cargo)")
+    cargo = extrair_campo(r"(?:Cargo\(s\) / Função\(ões\)|Cargo\(s\)|Profissão / Cargo Avaliado|Profissão / Cargo)")
     if cargo:
         dados["cargos"] = cargo
         dados["profissao_cargo"] = cargo
@@ -226,22 +225,22 @@ def parse_pre_relatorio(doc):
     dados["segurado_nascimento"] = extrair_campo(r"Data de Nascimento")
     dados["setor"] = extrair_campo(r"Setor.*?Lotação.*?")
     dados["ultima_remuneracao"] = extrair_campo(r"Última Remuneração.*?")
-    dados["objeto_pericia"] = extrair_campo(r"(?:Objeto da Perícia|Objetivo)")
+    dados["objeto_pericia"] = extrair_campo(r"(?:Objeto da Perícia|Objeto de Análise / Perícia|Objetivo)")
 
-    dados["atividades_inicial"] = extrair_campo(r"Atividades Descritas.*?", True)
-    if not dados.get("atividades_inicial"): dados["atividades_inicial"] = extrair_campo(r"Atividades Típicas.*?", True)
+    # Extrações de Múltiplas Linhas Blindadas
+    dados["atividades_inicial"] = extrair_campo(r"(?:Atividades Descritas.*|Atividades Típicas.*|Relato das Atividades.*|Relato Inicial.*)", multiline=True)
     if not dados.get("relato_inicial"): dados["relato_inicial"] = dados.get("atividades_inicial", "")
 
-    dados["agentes_alegados"] = extrair_campo(r"Agentes Nocivos.*?Riscos Alegados", True)
-    dados["apr_fisicos"] = extrair_campo(r"Agentes Físicos", True)
-    dados["apr_quimicos"] = extrair_campo(r"Agentes Químicos.*?", True)
-    dados["apr_biologicos"] = extrair_campo(r"Agentes Biológicos", True)
-    dados["enquadramento_legal_prev"] = extrair_campo(r"(?:Possível )?Enquadramento Legal", True)
+    dados["agentes_alegados"] = extrair_campo(r"Agentes Nocivos.*?Riscos Alegados", multiline=True)
+    dados["apr_fisicos"] = extrair_campo(r"Agentes Físicos.*?", multiline=True)
+    dados["apr_quimicos"] = extrair_campo(r"Agentes Químicos.*?", multiline=True)
+    dados["apr_biologicos"] = extrair_campo(r"Agentes Biológicos.*?", multiline=True)
+    dados["enquadramento_legal_prev"] = extrair_campo(r"(?:Possível )?Enquadramento Legal.*?", multiline=True)
 
-    dados["pedidos_tecnicos"] = extrair_campo(r"Pedidos Técnicos", True)
-    dados["preliminares_periciais"] = extrair_campo(r"Preliminares Periciais.*?", True)
-    dados["defesa_merito_sst"] = extrair_campo(r"Defesa de Mérito.*?", True)
-    dados["fase_processual"] = extrair_campo(r"Fase Processual Atual")
+    dados["pedidos_tecnicos"] = extrair_campo(r"Pedidos Técnicos.*?", multiline=True)
+    dados["preliminares_periciais"] = extrair_campo(r"Preliminares Periciais.*?", multiline=True)
+    dados["defesa_merito_sst"] = extrair_campo(r"Defesa de Mérito.*?", multiline=True)
+    dados["fase_processual"] = extrair_campo(r"Fase Processual Atual.*?")
     
     dh = extrair_campo(r"Data e Horário da Vistoria")
     if dh:
@@ -253,22 +252,24 @@ def parse_pre_relatorio(doc):
             dados["campo_data"] = dh
     else:
         dados["campo_data"] = extrair_campo(r"Data da Vistoria")
-        dados["campo_horario"] = extrair_campo(r"Horário") or extrair_campo(r"Horário da Vistoria")
+        dados["campo_horario"] = extrair_campo(r"Horário.*?")
         
     dados["local_diligencia"] = extrair_campo(r"Local / Endereço.*?")
 
-    dados["doc_ltcat"] = extrair_campo(r"LTCAT", True)
-    dados["doc_laudo"] = extrair_campo(r"LAUDO DE INSALUBRIDADE.*?", True)
-    dados["doc_ppp"] = extrair_campo(r"PPP \(Perfil.*?\)", True)
-    dados["doc_pgr"] = extrair_campo(r"PGR / PPRA.*?", True)
-    dados["doc_os"] = extrair_campo(r"ORDENS DE SERVIÇO.*?", True)
-    dados["doc_asos"] = extrair_campo(r"ASOs / PCMSO.*?", True)
-    dados["doc_outros"] = extrair_campo(r"Outros Documentos Relevantes.*?", True)
+    dados["doc_ltcat"] = extrair_campo(r"LTCAT", multiline=True)
+    dados["doc_laudo"] = extrair_campo(r"LAUDO DE INSALUBRIDADE.*?", multiline=True)
+    dados["doc_ppp"] = extrair_campo(r"PPP.*?", multiline=True)
+    dados["doc_pgr"] = extrair_campo(r"PGR / PPRA.*?", multiline=True)
+    dados["doc_os"] = extrair_campo(r"ORDENS DE SERVIÇO.*?", multiline=True)
+    dados["doc_asos"] = extrair_campo(r"ASOs / PCMSO.*?", multiline=True)
+    dados["doc_outros"] = extrair_campo(r"Outros Documentos Relevantes.*?", multiline=True)
 
-    dados["analise_epis_critica"] = extrair_campo(r"Síntese e Análise Crítica de EPIs", True)
-    dados["quesitos_juizo"] = extrair_campo(r"9\.1\. Quesitos do Juízo", True)
-    dados["quesitos_autor"] = extrair_campo(r"9\.2\. Quesitos do Reclamante.*?", True)
-    dados["quesitos_reu"] = extrair_campo(r"9\.3\. Quesitos da Reclamada.*?", True)
+    dados["analise_epis_critica"] = extrair_campo(r"Síntese e Análise Crítica de EPIs", multiline=True)
+    
+    # Extração de Quesitos garantida
+    dados["quesitos_juizo"] = extrair_campo(r"9\.1\. Quesitos do Juízo", multiline=True)
+    dados["quesitos_autor"] = extrair_campo(r"9\.2\. Quesitos do Reclamante.*?", multiline=True)
+    dados["quesitos_reu"] = extrair_campo(r"9\.3\. Quesitos da Reclamada.*?", multiline=True)
 
     return dados
 
@@ -517,7 +518,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
         if is_prev:
             tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Segurado & Tomador", "2️⃣ APR-HO & Extemporaneidade", "3️⃣ Planilha de EPIs", "4️⃣ Metodologia & Enquadramento"])
             with tab1:
-                st.markdown("### 1. Segurado & Tomador")
+                st.markdown("### 1. Identificação do Segurado e da Empresa")
                 with st.form(f"fp_1_{processo_id_selecionado}"):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -605,7 +606,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
         else:
             tab1, tab2, tab3, tab4, tab5 = st.tabs(["1️⃣ Identificação & Partes", "2️⃣ Contrato & Sínteses", "3️⃣ SST & Documentos", "4️⃣ Planilha de EPIs", "5️⃣ Quesitos Literais"])
             with tab1:
-                st.markdown("### 1. Identificação & Partes")
+                st.markdown("### 1. Papel Profissional, Tipos de Perícia & Identificação")
                 with st.form(f"ft_1_{processo_id_selecionado}"):
                     col_p1, col_p2 = st.columns(2)
                     with col_p1:
