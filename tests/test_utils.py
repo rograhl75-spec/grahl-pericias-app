@@ -22,7 +22,10 @@ def test_normalize_process_data_merges_defaults_without_shared_lists():
 
 
 def test_validate_process_data_allows_partial_save_but_flags_generation_requirements():
+    permissive = validate_process_data({"reclamante_nome": "Fulano"}, for_generation=False)
     result = validate_process_data({"reclamante_nome": "Fulano"}, for_generation=True)
+
+    assert permissive.is_valid
     assert not result.is_valid
     assert set(result.missing_required_fields) == {"reclamada_nome", "processo_num"}
 

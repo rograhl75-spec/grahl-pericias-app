@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import firebase_admin
 import streamlit as st
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, get_app
 
 
 @st.cache_resource(show_spinner=False)
 def get_firestore_client():
-    if firebase_admin._apps:
-        return firestore.client()
+    try:
+        return firestore.client(app=get_app())
+    except ValueError:
+        pass
 
     try:
         firebase_config = dict(st.secrets["firebase"])

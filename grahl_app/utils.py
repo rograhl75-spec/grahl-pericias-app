@@ -175,11 +175,13 @@ def sanitize_output_filename(name: object, prefix: str = "Documento_Oficial") ->
 
 def validate_process_data(data: dict | None, *, for_generation: bool = False) -> ValidationResult:
     normalized = normalize_process_data(data)
+    if not for_generation:
+        return ValidationResult(missing_required_fields=())
+
     module = normalized.get("modulo_atuacao") or ""
     required_fields = REQUIRED_FIELDS_FOR_GENERATION["default"]
-    if for_generation and module == MODULE_PREVIDENCIARIO:
+    if module == MODULE_PREVIDENCIARIO:
         required_fields = REQUIRED_FIELDS_FOR_GENERATION[MODULE_PREVIDENCIARIO]
-
     missing = tuple(field for field in required_fields if not normalize_multiline_text(normalized.get(field, "")))
     return ValidationResult(missing_required_fields=missing)
 
