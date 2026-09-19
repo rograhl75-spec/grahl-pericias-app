@@ -161,22 +161,26 @@ def parse_pre_relatorio(doc):
         m = re.search(r"(?:" + padrao + r")[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
         if m:
             v = m.group(1).replace("_", "").strip()
-            if v and "[informação" not in v.lower():
-                return v
+            # Remove completamente o aviso de informação não localizada e mantém o resto se existir
+            v_limpo = re.sub(r"\[informação.*?\]", "", v, flags=re.IGNORECASE).strip()
+            if v_limpo:
+                return v_limpo
         return ""
 
     def get_multi(padrao, next_sections, stop_on_number=True):
-        # Desabilita a trava numérica (1., 2.) quando estivermos lendo os Quesitos
+        # Desabilita a trava numérica quando estivermos lendo os Quesitos e blinda contra Bullet Points (•, -, *)
         if stop_on_number:
-            lookahead = r"(?=\n\d+\.\s*|(?:" + "|".join(next_sections) + r")|$)"
+            lookahead = r"(?=\n[\s]*[•\-\*]?[\s]*\d+\.\s*|(?:" + "|".join(next_sections) + r")|$)"
         else:
             lookahead = r"(?=(?:" + "|".join(next_sections) + r")|$)"
             
         m = re.search(r"(?:" + padrao + r")[\s]*[:|]?[\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
         if m:
             v = m.group(1).replace("_", "").strip()
-            if v and "[informação" not in v.lower():
-                return v
+            # Retira as sujeiras do Word em vez de anular todo o bloco
+            v_limpo = re.sub(r"\[informação.*?\]", "", v, flags=re.IGNORECASE).strip()
+            if v_limpo:
+                return v_limpo
         return ""
 
     # DADOS SIMPLES (Identificação e Contrato)
@@ -230,7 +234,7 @@ def parse_pre_relatorio(doc):
     dados["ultima_remuneracao"] = get_single(r"Última Remuneração.*?")
     dados["objeto_pericia"] = get_single(r"Objeto da Perícia|Objeto de Análise / Perícia|Objetivo")
 
-    # LISTA ATUALIZADA COM OS TÍTULOS EXATOS DO DOCUMENTO
+    # LISTA ATUALIZADA COM OS TÍTULOS E BULLET POINTS
     paradas = [
         r"Agentes Nocivos", r"Agentes Físicos", r"Agentes Químicos", r"Agentes Biológicos",
         r"Pedidos Técnicos", r"Preliminares Periciais", r"Defesa de Mérito", 
@@ -243,7 +247,7 @@ def parse_pre_relatorio(doc):
         r"ASOs / PCMSO", r"ASOs", 
         r"Outros Documentos Relevantes", r"Outros Documentos", 
         r"Síntese e Análise Crítica de EPIs", r"Síntese e Análise", 
-        r"9\.1", r"9\.2", r"9\.3", r"10\.", 
+        r"\n[\s]*[•\-\*]?[\s]*9\.1", r"\n[\s]*[•\-\*]?[\s]*9\.2", r"\n[\s]*[•\-\*]?[\s]*9\.3", r"\n[\s]*[•\-\*]?[\s]*10\.", 
         r"Pessoas Presentes", r"Informações prestadas", r"Medições Realizadas"
     ]
     
@@ -284,11 +288,17 @@ def parse_pre_relatorio(doc):
 
     dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs", paradas)
     
-    # EXTRAÇÃO DE QUESITOS (Aplicando stop_on_number=False e envelopando os nomes estendidos)
-    paradas_quesitos = [r"\n9\.2", r"\n9\.3", r"\n10\.", r"\nPessoas Presentes", r"\n10\. LEVANTAMENTOS DE CAMPO"]
+    # EXTRAÇÃO DE QUESITOS BLINDADA CONTRA BULLET POINTS
+    paradas_quesitos = [
+        r"\n[\s]*[•\-\*]?[\s]*9\.2", 
+        r"\n[\s]*[•\-\*]?[\s]*9\.3", 
+        r"\n[\s]*[•\-\*]?[\s]*10\.", 
+        r"\nPessoas Presentes", 
+        r"\n[\s]*[•\-\*]?[\s]*10\. LEVANTAMENTOS DE CAMPO"
+    ]
     dados["quesitos_juizo"] = get_multi(r"9\.1\.[\s]*Quesitos do Juízo", paradas_quesitos, stop_on_number=False)
-    dados["quesitos_autor"] = get_multi(r"9\.2\.[\s]*Quesitos do Reclamante(?:[\s]*\(Autor/Autora\))?", paradas_quesitos, stop_on_number=False)
-    dados["quesitos_reu"] = get_multi(r"9\.3\.[\s]*Quesitos da Reclamada(?:[\s]*\(Ré / Empresa\))?", paradas_quesitos, stop_on_number=False)
+    dados["quesitos_autor"] = get_multi(r"9\.2\.[\s]*Quesitos do Reclamante", paradas_quesitos, stop_on_number=False)
+    dados["quesitos_reu"] = get_multi(r"9\.3\.[\s]*Quesitos da Reclamada", paradas_quesitos, stop_on_number=False)
 
     return dados
 
@@ -582,7 +592,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     st.markdown("#### Avaliação de Extemporaneidade (Art. 279, IN 128/2022):")
                     p_atual["extemp_layout"] = st.checkbox("Houve mudança no layout ou organização do ambiente?", value=p_atual.get("extemp_layout", False), key=f"p2_el_{processo_id_selecionado}")
                     p_atual["extemp_maquinas"] = st.checkbox("Houve substituição de máquinas ou equipamentos?", value=p_atual.get("extemp_maquinas", False), key=f"p2_em_{processo_id_selecionado}")
-                    p_atual["extemp_epc"] = st.checkbox("Houve alteração nas tecnologias de proteção coletiva (EPC)?", value=p_atual.get("extemp_epc", False), key=f"p2_ee_{processo_id_selecionado}")
+                    p_atual["extemp_epc"] = st.checkbox("Houve alteração nas technologies de proteção coletiva (EPC)?", value=p_atual.get("extemp_epc", False), key=f"p2_ee_{processo_id_selecionado}")
                     
                     v_ext = p_atual.get("extemp_justificativa", "")
                     p_atual["extemp_justificativa"] = st.text_area("Fundamentação Técnica da Equivalência (Extemporaneidade)", value=v_ext, height=calcula_altura(v_ext, 100), key=f"p2_ej_{processo_id_selecionado}")
