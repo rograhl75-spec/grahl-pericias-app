@@ -81,12 +81,19 @@ def _style_table(table, *, body_font_size: float = 9, striped_fill: str = "F2F2F
                 for run in paragraph.runs:
                     _apply_run_style(run, size=body_font_size)
             if row_index == 0:
-                tc_pr.append(parse_xml(r'<w:shd {} w:fill="1B365D"/>'.format(nsdecls("w"))))
+                _set_cell_shading(tc_pr, "1B365D")
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
                         _apply_run_style(run, size=body_font_size, bold=True, color=RGBColor(255, 255, 255))
             elif row_index % 2 == 0:
-                tc_pr.append(parse_xml(r'<w:shd {} w:fill="{}"/>'.format(nsdecls("w"), striped_fill)))
+                _set_cell_shading(tc_pr, striped_fill)
+
+
+def _set_cell_shading(tc_pr, fill: str) -> None:
+    for child in list(tc_pr):
+        if child.tag == qn("w:shd"):
+            tc_pr.remove(child)
+    tc_pr.append(parse_xml(r'<w:shd {} w:fill="{}"/>'.format(nsdecls("w"), fill)))
 
 
 def _add_key_value_table(doc: Document, rows: Iterable[tuple[str, object]]) -> None:

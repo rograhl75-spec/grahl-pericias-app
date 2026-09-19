@@ -2,7 +2,7 @@ import pytest
 from docx import Document
 
 from grahl_app.parser import parse_pre_relatorio
-from grahl_app.photos import build_photo_entry, decode_photo_base64, photo_exists, photo_identity_hash
+from grahl_app.photos import build_photo_entry, decode_photo_base64, normalize_photo_entry, photo_exists, photo_identity_hash
 from grahl_app.utils import generate_next_process_id, normalize_process_data, sanitize_output_filename, validate_process_data
 
 
@@ -67,6 +67,16 @@ def test_photo_hash_helpers_detect_duplicates_and_invalid_base64():
     assert decode_photo_base64(entry["base64"]) == b"fake-image-bytes"
     with pytest.raises(ValueError):
         decode_photo_base64("not-base64!!")
+
+
+def test_normalize_photo_entry_keeps_path_entries_and_drops_invalid_items():
+    path_entry = normalize_photo_entry({"path": "/tmp/foto.png", "gps": None, "legenda": ""})
+    invalid_entry = normalize_photo_entry({"gps": "1,2"})
+
+    assert path_entry is not None
+    assert path_entry["path"] == "/tmp/foto.png"
+    assert path_entry["legenda"]
+    assert invalid_entry is None
 
 
 def test_sanitize_output_filename_removes_invalid_characters():

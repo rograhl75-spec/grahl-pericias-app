@@ -50,12 +50,13 @@ def delete_process(process_id: str) -> None:
 def create_process_with_auto_id(process_data: dict, *, existing_ids: Iterable[str] | None = None, max_attempts: int = 5) -> str:
     db = get_firestore_client()
     current_ids = list(existing_ids or [])
+    normalized_payload = normalize_process_data(process_data)
     for _ in range(max_attempts):
         if not current_ids:
             current_ids = fetch_process_ids_uncached()
         process_id = generate_next_process_id(current_ids)
         try:
-            db.collection(COLLECTION_PROCESSOS).document(process_id).create(normalize_process_data(process_data))
+            db.collection(COLLECTION_PROCESSOS).document(process_id).create(normalized_payload)
         except AlreadyExists:
             clear_process_cache()
             current_ids = fetch_process_ids_uncached()
