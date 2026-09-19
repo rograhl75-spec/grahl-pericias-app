@@ -104,12 +104,12 @@ def calcula_altura(texto, min_h):
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
     return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
-# === NOVO MOTOR INTELIGENTE DE LEITURA E MAPA DE DADOS ===
+# === SUPER EXTRATOR REGEX ESTRUTURADO ===
 def parse_pre_relatorio(doc):
     dados = {}
     linhas = []
     
-    # 1. Extrai todo o texto dos parágrafos
+    # 1. Puxa texto limpo de todos os parágrafos (Ignora formatação Word)
     for p in doc.paragraphs:
         if p.text.strip():
             linhas.append(p.text.strip())
@@ -117,11 +117,11 @@ def parse_pre_relatorio(doc):
     empresas_cnis = []
     epis_extraidos = []
     
-    # 2. Extração Segura das Tabelas (Ignorando Tabelas Invisíveis de Formatação)
+    # 2. Puxa texto de dentro de tabelas
     for table in doc.tables:
         if len(table.rows) > 0:
             hdr = [cell.text.lower() for cell in table.rows[0].cells]
-            # Identifica Tabela de EPI
+            # Tabela de EPI
             if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h for h in hdr):
                 for row in table.rows[1:]:
                     cells = row.cells
@@ -132,7 +132,8 @@ def parse_pre_relatorio(doc):
                     desc = desc.replace("**", "").replace("*", "")
                     if desc and "[extrair" not in desc.lower() and "---" not in desc and "informação" not in desc.lower():
                         epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
-            # Identifica Tabela do CNIS (Extrajudicial)
+            
+            # Tabela CNIS Extrajudicial
             elif any("empresa" in h or "tomador" in h or "vínculo" in h for h in hdr):
                 for row in table.rows[1:]:
                     if len(row.cells) >= 2:
@@ -140,136 +141,135 @@ def parse_pre_relatorio(doc):
                         if emp_text and "AGRUPAMENTO" not in emp_text.upper():
                             empresas_cnis.append(emp_text)
 
-            # Transforma a tabela num formato legível para os campos simples (Ex: "Número do Processo | ATOrd...")
+            # Para Tabelas Invisíveis de Formatação (Ex: 1. IDENTIFICAÇÃO DO PROCESSO gerada pelo próprio App)
             for row in table.rows:
-                row_text = " | ".join([c.text.strip() for c in row.cells if c.text.strip()])
+                # Usa ':' para unir colunas. Garante que a regex vai encontrar o separador.
+                row_text = " : ".join([c.text.strip() for c in row.cells if c.text.strip()])
                 if row_text:
                     linhas.append(row_text)
 
     if epis_extraidos:
         dados["quadro_epis"] = epis_extraidos
 
-    # 3. Bloco Mestre de Texto
+    # Junta tudo num bloco contínuo
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
 
-    # 4. Função Blindada de Busca e Extração
-    def extrair_campo(regex_pattern, multiline=False):
-        if not multiline:
-            # O separador aceita tanto os dois-pontos (:) quanto as colunas das tabelas do Word (|)
-            m = re.search(regex_pattern + r"[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
-            if m:
-                val = m.group(1).replace("_", "").strip()
-                return val if "[informação" not in val.lower() and val else ""
-            return ""
-        else:
-            # Lookahead: A leitura NUNCA para a não ser que encontre o Título Mestre exato de outra seção.
-            lookahead = r"(?=\n\d+\.\s*(?:IDENTIFICAÇÃO|QUALIFICAÇÃO|DADOS|SÍNTESE|STATUS|ANÁLISE|QUADRO|QUESITOS|LEVANTAMENTOS|REGISTROS|CONCLUSÃO)|$)"
-            # Se for um quesito, ele para no próximo quesito ou na próxima Seção Mestre
-            if "Quesitos" in regex_pattern:
-                lookahead = r"(?=\n9\.\d\.\s*Quesitos|\n\d+\.\s*(?:IDENTIFICAÇÃO|QUALIFICAÇÃO|DADOS|SÍNTESE|STATUS|ANÁLISE|QUADRO|QUESITOS|LEVANTAMENTOS|REGISTROS|CONCLUSÃO)|$)"
-            
-            m = re.search(regex_pattern + r"[\s]*[:|][\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
-            if m:
-                val = m.group(1).replace("_", "").strip()
-                return val if "[informação" not in val.lower() and val else ""
-            return ""
+    # FUNÇÕES BLINDADAS DE EXTRAÇÃO
+    def get_single(padrao):
+        # Busca a chave, ignora espaços e (:) ou (|), e extrai tudo até o fim da linha
+        m = re.search(r"(?:" + padrao + r")[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
+        if m:
+            v = m.group(1).replace("_", "").strip()
+            if v and "[informação" not in v.lower():
+                return v
+        return ""
 
-    # Extração Simples (Funciona com Linhas e Tabelas)
-    dados["processo_num"] = extrair_campo(r"(?:Número do Processo|Processo)")
-    dados["orgao_julgador"] = extrair_campo(r"(?:Órgão Julgador / Vara|Órgão Julgador|Vara)")
-    dados["data_autuacao"] = extrair_campo(r"(?:Data de Autuação.*?Ajuizamento.*?|Data de Autuação)")
-    dados["valor_causa"] = extrair_campo(r"Valor da Causa")
-    dados["rito_processual"] = extrair_campo(r"Rito Processual")
+    def get_multi(padrao, next_sections):
+        # Extrai blocos multilinhas (Ex: Quesitos) blindando onde ele deve parar de ler
+        lookahead = r"(?=\n\d+\.\s*|(?:" + "|".join(next_sections) + r")|$)"
+        m = re.search(r"(?:" + padrao + r")[\s]*[:|]?[\s]*(.*?)" + lookahead, texto, re.IGNORECASE | re.DOTALL)
+        if m:
+            v = m.group(1).replace("_", "").strip()
+            if v and "[informação" not in v.lower():
+                return v
+        return ""
 
-    # Nome e CPF (Mesma linha ou linhas separadas)
-    rec_linha = extrair_campo(r"(?:Reclamante \(Autor/Autora\)|Reclamante|Nome do Segurado|Nome)")
-    if rec_linha:
-        m_cpf = re.search(r"(?:CPF|NIT|PIS)[\s:]*([\d\.\-\/]+)", rec_linha, re.IGNORECASE)
+    # DADOS SIMPLES (Identificação e Contrato)
+    dados["processo_num"] = get_single(r"Número do Processo|Processo")
+    dados["orgao_julgador"] = get_single(r"Órgão Julgador / Vara|Órgão Julgador")
+    dados["data_autuacao"] = get_single(r"Data de Autuação.*?Ajuizamento.*?|Data de Autuação")
+    dados["valor_causa"] = get_single(r"Valor da Causa")
+    dados["rito_processual"] = get_single(r"Rito Processual")
+
+    # Reclamante com tratamento anti-sujeira
+    rec = get_single(r"Reclamante \(Autor/Autora\)|Reclamante|Nome do Segurado|Nome")
+    if rec:
+        m_cpf = re.search(r"(?:CPF|NIT|PIS)[\s:]*([\d\.\-\/]+)", rec, re.IGNORECASE)
         if m_cpf:
             dados["reclamante_cpf"] = m_cpf.group(1)
-            rec_linha = re.sub(r"\((?:CPF|NIT|PIS).*?\)", "", rec_linha, flags=re.IGNORECASE).strip()
-        dados["reclamante_nome"] = rec_linha
-        
+            rec = re.sub(r"\((?:CPF|NIT|PIS).*?\)", "", rec, flags=re.IGNORECASE).strip()
+        dados["reclamante_nome"] = rec
     if not dados.get("reclamante_cpf"):
-        dados["reclamante_cpf"] = extrair_campo(r"(?:CPF/NIT|CPF / NIT / PIS|CPF)")
+        dados["reclamante_cpf"] = get_single(r"CPF/NIT|CPF / NIT / PIS|CPF")
 
-    # Puxa até 2 advogados na sequência
-    m_advs = re.findall(r"Advogados[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
-    if len(m_advs) >= 1: dados["reclamante_adv"] = m_advs[0].replace("_", "").strip()
-    if len(m_advs) >= 2: dados["reclamada_adv"] = m_advs[1].replace("_", "").strip()
+    # Advogados (Puxa os dois na sequência)
+    advs = re.findall(r"Advogados[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
+    if len(advs) >= 1: dados["reclamante_adv"] = advs[0].replace("_", "").strip()
+    if len(advs) >= 2: dados["reclamada_adv"] = advs[1].replace("_", "").strip()
 
-    # Reclamada e CNPJ
-    recd_linha = extrair_campo(r"(?:Reclamada \(Ré/Empresa\)|Reclamada \(Ré / Empresa\)|Reclamada|Razão Social da Empresa / Tomador|Razão Social)")
-    if recd_linha:
-        m_cnpj = re.search(r"(?:CNPJ)[\s:]*([\d\.\-\/]+)", recd_linha, re.IGNORECASE)
+    # Reclamada
+    recd = get_single(r"Reclamada \(Ré/Empresa\)|Reclamada \(Ré / Empresa\)|Reclamada|Razão Social da Empresa / Tomador|Razão Social")
+    if recd:
+        m_cnpj = re.search(r"CNPJ[\s:]*([\d\.\-\/]+)", recd, re.IGNORECASE)
         if m_cnpj:
             dados["reclamada_cnpj"] = m_cnpj.group(1)
-            recd_linha = re.sub(r"\(?CNPJ.*?\)?", "", recd_linha, flags=re.IGNORECASE).strip()
-        dados["reclamada_nome"] = recd_linha.strip(" ()-")
-        
+            recd = re.sub(r"\(?CNPJ.*?\)?", "", recd, flags=re.IGNORECASE).strip()
+        dados["reclamada_nome"] = recd.strip(" ()-")
     if not dados.get("reclamada_cnpj"):
-        dados["reclamada_cnpj"] = extrair_campo(r"(?:CNPJ da Empresa|CNPJ)")
+        dados["reclamada_cnpj"] = get_single(r"CNPJ da Empresa|CNPJ")
 
     if not dados.get("reclamada_nome") and empresas_cnis:
         dados["reclamada_nome"] = empresas_cnis[-1]
 
-    dados["data_admissao"] = extrair_campo(r"(?:Data de Admissão|Período de Trabalho.*?)")
-    dados["status_contrato"] = extrair_campo(r"Status do Contrato.*?")
-    dados["periodo_imprescrito"] = extrair_campo(r"Período Imprescrito.*?")
-    
-    cargo = extrair_campo(r"(?:Cargo\(s\) / Função\(ões\)|Cargo\(s\)|Profissão / Cargo Avaliado|Profissão / Cargo)")
+    # Contrato
+    dados["data_admissao"] = get_single(r"Data de Admissão|Período de Trabalho.*?")
+    dados["status_contrato"] = get_single(r"Status do Contrato.*?")
+    dados["periodo_imprescrito"] = get_single(r"Período Imprescrito.*?")
+    cargo = get_single(r"Cargo\(s\) / Função\(ões\)|Cargo\(s\)|Profissão / Cargo Avaliado|Profissão / Cargo")
     if cargo:
         dados["cargos"] = cargo
         dados["profissao_cargo"] = cargo
         
-    dados["segurado_nascimento"] = extrair_campo(r"Data de Nascimento")
-    dados["setor"] = extrair_campo(r"Setor.*?Lotação.*?")
-    dados["ultima_remuneracao"] = extrair_campo(r"Última Remuneração.*?")
-    dados["objeto_pericia"] = extrair_campo(r"(?:Objeto da Perícia|Objeto de Análise / Perícia|Objetivo)")
+    dados["segurado_nascimento"] = get_single(r"Data de Nascimento")
+    dados["setor"] = get_single(r"Setor.*?Lotação.*?")
+    dados["ultima_remuneracao"] = get_single(r"Última Remuneração.*?")
+    dados["objeto_pericia"] = get_single(r"Objeto da Perícia|Objeto de Análise / Perícia|Objetivo")
 
-    # Extrações de Múltiplas Linhas Blindadas
-    dados["atividades_inicial"] = extrair_campo(r"(?:Atividades Descritas.*|Atividades Típicas.*|Relato das Atividades.*|Relato Inicial.*)", multiline=True)
+    # BLOCOS MULTILINHAS (Sínteses e Documentos)
+    paradas = [r"Agentes Nocivos", r"Agentes Físicos", r"Pedidos Técnicos", r"Preliminares Periciais", r"Defesa de Mérito", r"Fase Processual", r"Data da Vistoria", r"Local / Endereço", r"Análise do LTCAT", r"Laudo de Insalubridade", r"Análise do PPP", r"Análise do PGR", r"Ordens de Serviço", r"ASOs / PCMSO", r"Outros Documentos", r"Síntese e Análise", r"9\.1", r"9\.2", r"9\.3", r"Pessoas Presentes", r"Informações prestadas", r"Medições Realizadas"]
+    
+    dados["atividades_inicial"] = get_multi(r"Atividades Descritas.*?|Atividades Típicas.*?|Relato das Atividades.*?|Relato Inicial.*?", paradas)
     if not dados.get("relato_inicial"): dados["relato_inicial"] = dados.get("atividades_inicial", "")
 
-    dados["agentes_alegados"] = extrair_campo(r"Agentes Nocivos.*?Riscos Alegados", multiline=True)
-    dados["apr_fisicos"] = extrair_campo(r"Agentes Físicos.*?", multiline=True)
-    dados["apr_quimicos"] = extrair_campo(r"Agentes Químicos.*?", multiline=True)
-    dados["apr_biologicos"] = extrair_campo(r"Agentes Biológicos.*?", multiline=True)
-    dados["enquadramento_legal_prev"] = extrair_campo(r"(?:Possível )?Enquadramento Legal.*?", multiline=True)
+    dados["agentes_alegados"] = get_multi(r"Agentes Nocivos.*?Riscos Alegados", paradas)
+    dados["apr_fisicos"] = get_multi(r"Agentes Físicos.*?", paradas)
+    dados["apr_quimicos"] = get_multi(r"Agentes Químicos.*?", paradas)
+    dados["apr_biologicos"] = get_multi(r"Agentes Biológicos.*?", paradas)
+    dados["enquadramento_legal_prev"] = get_multi(r"(?:Possível )?Enquadramento Legal.*?", paradas)
 
-    dados["pedidos_tecnicos"] = extrair_campo(r"Pedidos Técnicos.*?", multiline=True)
-    dados["preliminares_periciais"] = extrair_campo(r"Preliminares Periciais.*?", multiline=True)
-    dados["defesa_merito_sst"] = extrair_campo(r"Defesa de Mérito.*?", multiline=True)
-    dados["fase_processual"] = extrair_campo(r"Fase Processual Atual.*?")
+    dados["pedidos_tecnicos"] = get_multi(r"Pedidos Técnicos.*?", paradas)
+    dados["preliminares_periciais"] = get_multi(r"Preliminares Periciais.*?", paradas)
+    dados["defesa_merito_sst"] = get_multi(r"Defesa de Mérito.*?", paradas)
+    dados["fase_processual"] = get_single(r"Fase Processual Atual.*?")
     
-    dh = extrair_campo(r"Data e Horário da Vistoria")
-    if dh:
-        if "às" in dh:
-            pts = dh.split("às")
-            dados["campo_data"] = pts[0].strip()
-            dados["campo_horario"] = pts[1].strip()
-        else:
-            dados["campo_data"] = dh
+    dh = get_single(r"Data e Horário da Vistoria")
+    if dh and "às" in dh:
+        pts = dh.split("às")
+        dados["campo_data"] = pts[0].strip()
+        dados["campo_horario"] = pts[1].strip()
+    elif dh:
+        dados["campo_data"] = dh
     else:
-        dados["campo_data"] = extrair_campo(r"Data da Vistoria")
-        dados["campo_horario"] = extrair_campo(r"Horário.*?")
+        dados["campo_data"] = get_single(r"Data da Vistoria")
+        dados["campo_horario"] = get_single(r"Horário.*?")
         
-    dados["local_diligencia"] = extrair_campo(r"Local / Endereço.*?")
+    dados["local_diligencia"] = get_single(r"Local / Endereço.*?")
 
-    dados["doc_ltcat"] = extrair_campo(r"LTCAT", multiline=True)
-    dados["doc_laudo"] = extrair_campo(r"LAUDO DE INSALUBRIDADE.*?", multiline=True)
-    dados["doc_ppp"] = extrair_campo(r"PPP.*?", multiline=True)
-    dados["doc_pgr"] = extrair_campo(r"PGR / PPRA.*?", multiline=True)
-    dados["doc_os"] = extrair_campo(r"ORDENS DE SERVIÇO.*?", multiline=True)
-    dados["doc_asos"] = extrair_campo(r"ASOs / PCMSO.*?", multiline=True)
-    dados["doc_outros"] = extrair_campo(r"Outros Documentos Relevantes.*?", multiline=True)
+    dados["doc_ltcat"] = get_multi(r"Análise do LTCAT|LTCAT", paradas)
+    dados["doc_laudo"] = get_multi(r"Análise de Laudos.*?|LAUDO DE INSALUBRIDADE.*?", paradas)
+    dados["doc_ppp"] = get_multi(r"Análise do PPP.*?|PPP.*?", paradas)
+    dados["doc_pgr"] = get_multi(r"Análise do PGR.*?|PGR / PPRA.*?", paradas)
+    dados["doc_os"] = get_multi(r"Ordens de Serviço.*?|ORDENS DE SERVIÇO.*?", paradas)
+    dados["doc_asos"] = get_multi(r"ASOs / PCMSO.*?|ASOs / PCMSO", paradas)
+    dados["doc_outros"] = get_multi(r"Outros Documentos.*?", paradas)
 
-    dados["analise_epis_critica"] = extrair_campo(r"Síntese e Análise Crítica de EPIs", multiline=True)
+    dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs", paradas)
     
-    # Extração de Quesitos garantida
-    dados["quesitos_juizo"] = extrair_campo(r"9\.1\. Quesitos do Juízo", multiline=True)
-    dados["quesitos_autor"] = extrair_campo(r"9\.2\. Quesitos do Reclamante.*?", multiline=True)
-    dados["quesitos_reu"] = extrair_campo(r"9\.3\. Quesitos da Reclamada.*?", multiline=True)
+    # EXTRAÇÃO DE QUESITOS (Blindada contra números de parágrafos)
+    paradas_quesitos = [r"\n9\.2", r"\n9\.3", r"\n10\.", r"\nPessoas Presentes"]
+    dados["quesitos_juizo"] = get_multi(r"9\.1\.\s*Quesitos do Juízo", paradas_quesitos)
+    dados["quesitos_autor"] = get_multi(r"9\.2\.\s*Quesitos do Reclamante.*?", paradas_quesitos)
+    dados["quesitos_reu"] = get_multi(r"9\.3\.\s*Quesitos da Reclamada.*?", paradas_quesitos)
 
     return dados
 
@@ -632,12 +632,12 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         p_atual["reclamada_adv"] = st.text_input("Advogados da Reclamada (Nomes e OAB)", value=p_atual.get("reclamada_adv", ""), key=f"s1_rda_{processo_id_selecionado}")
 
                     st.markdown("<br>", unsafe_allow_html=True)
-                    if st.form_submit_button("💾 Salvar Identificação e Partes"):
+                    if st.form_submit_button("💾 Salvar Papel, Identificação e Partes"):
                         salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Identificação salva!", icon="💾")
 
             with tab2:
-                st.markdown("### 2. Contrato & Sínteses")
+                st.markdown("### 2. Contrato & Sínteses da Inicial e Defesa")
                 with st.form(f"ft_2_{processo_id_selecionado}"):
                     col3, col4 = st.columns(2)
                     with col3:
@@ -667,7 +667,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         st.toast("✅ Contrato e Sínteses salvos!", icon="💾")
 
             with tab3:
-                st.markdown("### 3. SST & Documentos")
+                st.markdown("### 3. Vistoria & Análise de Documentos de SST")
                 with st.form(f"ft_3_{processo_id_selecionado}"):
                     col5, col6, col7 = st.columns(3)
                     with col5: p_atual["fase_processual"] = st.text_input("Fase Processual Atual", value=p_atual.get("fase_processual", ""), key=f"s3_fp_{processo_id_selecionado}")
@@ -697,7 +697,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         st.toast("✅ Análises de Documentos salvas!", icon="💾")
 
             with tab4:
-                st.markdown("### 4. Planilha de EPIs & Análise Crítica")
+                st.markdown("### 4. Quadro de Fornecimento de EPIs & Análise Crítica")
                 epis_atuais = p_atual.get("quadro_epis", [])
                 df_epis = pd.DataFrame(epis_atuais, columns=["descricao", "ca", "data_entrega", "obs"])
                 edited_df = st.data_editor(
@@ -727,7 +727,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         st.toast("✅ Análise Crítica salva!", icon="💾")
 
             with tab5:
-                st.markdown("### 5. Quesitos Literais")
+                st.markdown("### 5. Quesitos Formulados para a Perícia")
                 with st.form(f"ft_5_{processo_id_selecionado}"):
                     v_q1 = p_atual.get("quesitos_juizo", "")
                     p_atual["quesitos_juizo"] = st.text_area("9.1. Quesitos do Juízo", value=v_q1, height=calcula_altura(v_q1, 150), key=f"s5_qj_{processo_id_selecionado}")
