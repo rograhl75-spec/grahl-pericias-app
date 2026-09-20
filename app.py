@@ -104,7 +104,7 @@ def calcula_altura(texto, min_h):
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
     return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
-# === MOTOR DE EXTRAÇÃO DUPLO (TAGS IA + TEXTO NATURAL) ===
+# === MOTOR DE EXTRAÇÃO DUPLO CORRIGIDO (TAGS + NATURAL) ===
 def parse_pre_relatorio(doc):
     dados = {}
     texto_completo = ""
@@ -199,25 +199,26 @@ def parse_pre_relatorio(doc):
         dados["quesitos_autor"] = extrair_bloco("QUESITOS_AUTOR")
         dados["quesitos_reu"] = extrair_bloco("QUESITOS_REU")
 
+        # Correção do Bug dos EPIs: Removida a trava rígida do 'CA' que bloqueava o LTCAT
         quadro_epis_texto = extrair_bloco("QUADRO_EPIS")
         epis_extraidos = []
         if quadro_epis_texto:
             linhas_epi = quadro_epis_texto.strip().split('\n')
             for linha in linhas_epi:
-                if '|' in linha and '---' not in linha and 'descri' not in linha.lower() and 'c.a' not in linha.lower() and 'ca' not in linha.lower():
+                if '|' in linha and '---' not in linha and 'descrição' not in linha.lower():
                     parts = [p.strip() for p in linha.split('|')]
                     if len(parts) >= 2:
                         desc = parts[0]
                         ca = parts[1]
                         data = parts[2] if len(parts) > 2 else ""
                         obs = parts[3] if len(parts) > 3 else ""
-                        if desc and "[informação" not in desc.lower() and "n/a" not in desc.lower():
+                        if desc and "[informação" not in desc.lower() and "n/a" not in desc.lower() and desc != "-":
                             epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
         dados["quadro_epis"] = epis_extraidos
         
         return dados
 
-    # 2. MOTOR DE TEXTO NATURAL (Fallback para documentos de escritório sem tags)
+    # 2. MOTOR DE TEXTO NATURAL (Fallback para documentos sem tags)
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
 
     def get_single(padrao):
@@ -235,87 +236,91 @@ def parse_pre_relatorio(doc):
             if v and "[informação" not in v.lower(): return v
         return ""
 
-    dados["processo_num"] = get_single(r"Número do Processo|Processo")
-    dados["orgao_julgador"] = get_single(r"Órgão Julgador / Vara|Órgão Julgador")
-    dados["data_autuacao"] = get_single(r"Data de Autuação.*?Ajuizamento.*?|Data de Autuação")
+    dados["processo_num"] = get_single(r"Número do Processo[^\n:]*|Processo")
+    dados["orgao_julgador"] = get_single(r"Órgão Julgador[^\n:]*|Vara")
+    dados["data_autuacao"] = get_single(r"Data de Autuação[^\n:]*|Ajuizamento.*?")
     dados["valor_causa"] = get_single(r"Valor da Causa")
     dados["rito_processual"] = get_single(r"Rito Processual")
 
-    rec = get_single(r"Reclamante \(Autor/Autora\)|Reclamante|Nome do Segurado|Nome")
+    rec = get_single(r"Reclamante[^\n:]*|Nome do Segurado[^\n:]*|Nome[^\n:]*")
     if rec:
         m_cpf = re.search(r"\((?:CPF|NIT|PIS)\s*([\d\.\-\/]+)\)", rec, re.IGNORECASE)
         if m_cpf:
             dados["reclamante_cpf"] = m_cpf.group(1)
             rec = re.sub(r"\((?:CPF|NIT|PIS).*?\)", "", rec, flags=re.IGNORECASE).strip()
         dados["reclamante_nome"] = rec
-    if not dados.get("reclamante_cpf"): dados["reclamante_cpf"] = get_single(r"CPF / NIT / PIS|CPF/NIT|CPF")
+    if not dados.get("reclamante_cpf"): dados["reclamante_cpf"] = get_single(r"CPF[^\n:]*|NIT[^\n:]*|PIS[^\n:]*")
 
-    recd = get_single(r"Reclamada \(Ré/Empresa\)|Razão Social da Empresa / Tomador|Reclamada|Razão Social")
+    recd = get_single(r"Reclamada[^\n:]*|Razão Social[^\n:]*")
     if recd:
         m_cnpj = re.search(r"CNPJ[\s:]*([\d\.\-\/]+)", recd, re.IGNORECASE)
         if m_cnpj:
             dados["reclamada_cnpj"] = m_cnpj.group(1)
             recd = re.sub(r"\(?CNPJ.*?\)?", "", recd, flags=re.IGNORECASE).strip()
         dados["reclamada_nome"] = recd.strip(" ()-")
-    if not dados.get("reclamada_cnpj"): dados["reclamada_cnpj"] = get_single(r"CNPJ da Empresa|CNPJ")
+    if not dados.get("reclamada_cnpj"): dados["reclamada_cnpj"] = get_single(r"CNPJ[^\n:]*")
 
     advs = re.findall(r"Advogados[\s]*[:|][\s]*([^\n]+)", texto, re.IGNORECASE)
     if len(advs) >= 1: dados["reclamante_adv"] = advs[0].strip()
     if len(advs) >= 2: dados["reclamada_adv"] = advs[1].strip()
 
-    dados["data_admissao"] = get_single(r"Data de Admissão|Período Avaliado")
-    dados["status_contrato"] = get_single(r"Status do Contrato")
-    dados["periodo_imprescrito"] = get_single(r"Período Imprescrito.*?Alvo da Perícia.*?")
-    cargo = get_single(r"Cargo\(s\) / Função\(ões\)|Profissão / Cargo Avaliado|Profissão / Cargo")
+    dados["data_admissao"] = get_single(r"Data de Admissão[^\n:]*|Período Avaliado")
+    dados["status_contrato"] = get_single(r"Status do Contrato[^\n:]*")
+    
+    # Correção: O regex "[^\n:]*" absorve parênteses explicativos como "(Alvo da Perícia)"
+    dados["periodo_imprescrito"] = get_single(r"Período Imprescrito[^\n:]*")
+    
+    cargo = get_single(r"Cargo[^\n:]*|Profissão[^\n:]*")
     if cargo:
         dados["cargos"] = cargo
         dados["profissao_cargo"] = cargo
-    dados["segurado_nascimento"] = get_single(r"Data de Nascimento")
-    dados["setor"] = get_single(r"Setor / Lotação.*?|Setor")
-    dados["ultima_remuneracao"] = get_single(r"Última Remuneração.*?")
-    dados["objeto_pericia"] = get_single(r"Objeto da Perícia|Objeto de Análise / Perícia|Objetivo")
+        
+    dados["segurado_nascimento"] = get_single(r"Data de Nascimento[^\n:]*")
+    dados["setor"] = get_single(r"Setor[^\n:]*|Lotação[^\n:]*")
+    dados["ultima_remuneracao"] = get_single(r"Última Remuneração[^\n:]*")
+    dados["objeto_pericia"] = get_single(r"Objeto da Perícia[^\n:]*|Objeto de Análise[^\n:]*|Objetivo[^\n:]*")
 
     paradas = [r"Agentes Nocivos", r"Agentes Físicos", r"Pedidos Técnicos", r"Preliminares Periciais", r"Defesa de Mérito", r"Fase Processual", r"Data da Vistoria", r"Local / Endereço", r"Análise do LTCAT", r"Laudo de Insalubridade", r"Análise do PPP", r"Análise do PGR", r"Ordens de Serviço", r"ASOs / PCMSO", r"Outros Documentos", r"Síntese e Análise", r"9\.1", r"9\.2", r"9\.3", r"Pessoas Presentes", r"Informações prestadas", r"Medições Realizadas"]
     
-    dados["atividades_inicial"] = get_multi(r"Atividades Descritas.*?|Atividades Típicas.*?|Relato das Atividades.*?|Relato Inicial.*?", paradas)
+    dados["atividades_inicial"] = get_multi(r"Atividades Descritas[^\n:]*|Atividades Típicas[^\n:]*|Relato das Atividades[^\n:]*|Relato Inicial[^\n:]*", paradas)
     if not dados.get("relato_inicial"): dados["relato_inicial"] = dados.get("atividades_inicial", "")
 
-    dados["agentes_alegados"] = get_multi(r"Agentes Nocivos / Riscos Alegados|Agentes Nocivos", paradas)
-    dados["apr_fisicos"] = get_multi(r"Agentes Físicos", paradas)
-    dados["apr_quimicos"] = get_multi(r"Agentes Químicos", paradas)
-    dados["apr_biologicos"] = get_multi(r"Agentes Biológicos", paradas)
-    dados["enquadramento_legal_prev"] = get_multi(r"Enquadramento Legal", paradas)
+    dados["agentes_alegados"] = get_multi(r"Agentes Nocivos[^\n:]*|Riscos Alegados[^\n:]*", paradas)
+    dados["apr_fisicos"] = get_multi(r"Agentes Físicos[^\n:]*", paradas)
+    dados["apr_quimicos"] = get_multi(r"Agentes Químicos[^\n:]*", paradas)
+    dados["apr_biologicos"] = get_multi(r"Agentes Biológicos[^\n:]*", paradas)
+    dados["enquadramento_legal_prev"] = get_multi(r"Enquadramento Legal[^\n:]*", paradas)
     
-    dados["pedidos_tecnicos"] = get_multi(r"Pedidos Técnicos", paradas)
-    dados["preliminares_periciais"] = get_multi(r"Preliminares Periciais", paradas)
-    dados["defesa_merito_sst"] = get_multi(r"Defesa de Mérito \(SST\)", paradas)
+    dados["pedidos_tecnicos"] = get_multi(r"Pedidos Técnicos[^\n:]*", paradas)
+    dados["preliminares_periciais"] = get_multi(r"Preliminares Periciais[^\n:]*", paradas)
+    dados["defesa_merito_sst"] = get_multi(r"Defesa de Mérito[^\n:]*", paradas)
 
-    dados["fase_processual"] = get_multi(r"Fase Processual Atual", paradas)
-    dados["campo_data"] = get_multi(r"Data da Vistoria", paradas)
-    dados["campo_horario"] = get_multi(r"Horário|Horário da Vistoria", paradas)
-    dados["local_diligencia"] = get_multi(r"Local / Endereço", paradas)
+    dados["fase_processual"] = get_multi(r"Fase Processual Atual[^\n:]*", paradas)
+    dados["campo_data"] = get_multi(r"Data da Vistoria[^\n:]*", paradas)
+    dados["campo_horario"] = get_multi(r"Horário[^\n:]*", paradas)
+    dados["local_diligencia"] = get_multi(r"Local[^\n:]*|Endereço[^\n:]*", paradas)
 
-    dados["doc_ltcat"] = get_multi(r"LTCAT", paradas)
-    dados["doc_laudo"] = get_multi(r"LAUDO DE INSALUBRIDADE / PERICULOSIDADE.*?", paradas)
-    dados["doc_ppp"] = get_multi(r"PPP.*?", paradas)
-    dados["doc_pgr"] = get_multi(r"PGR / PPRA / PCMAT", paradas)
-    dados["doc_os"] = get_multi(r"ORDENS DE SERVIÇO.*?", paradas)
-    dados["doc_asos"] = get_multi(r"ASOs / PCMSO", paradas)
-    dados["doc_outros"] = get_multi(r"Outros Documentos Relevantes", paradas)
+    dados["doc_ltcat"] = get_multi(r"LTCAT[^\n:]*", paradas)
+    dados["doc_laudo"] = get_multi(r"LAUDO DE INSALUBRIDADE[^\n:]*|Laudos Prévios[^\n:]*", paradas)
+    dados["doc_ppp"] = get_multi(r"PPP[^\n:]*", paradas)
+    dados["doc_pgr"] = get_multi(r"PGR[^\n:]*|PPRA[^\n:]*", paradas)
+    dados["doc_os"] = get_multi(r"ORDENS DE SERVIÇO[^\n:]*", paradas)
+    dados["doc_asos"] = get_multi(r"ASOs[^\n:]*|PCMSO[^\n:]*", paradas)
+    dados["doc_outros"] = get_multi(r"Outros Documentos[^\n:]*", paradas)
 
-    dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs", paradas)
+    dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs[^\n:]*", paradas)
 
     paradas_quesitos = [r"\n9\.2\.", r"\n9\.3\.", r"\n10\.\s+LEVANTAMENTOS", r"\nPessoas Presentes"]
     dados["quesitos_juizo"] = get_multi(r"9\.1\.\s+Quesitos do Juízo", [r"\n9\.2\."])
     dados["quesitos_autor"] = get_multi(r"9\.2\.\s+Quesitos do Reclamante.*?", [r"\n9\.3\."])
     dados["quesitos_reu"] = get_multi(r"9\.3\.\s+Quesitos da Reclamada.*?", [r"\n10\.\s+LEVANTAMENTOS", r"\nPessoas Presentes"])
 
-    # Extração das Tabelas de EPIs
+    # Extração de EPI no modo Natural (Sem trava do CA)
     epis_extraidos = []
     for table in doc.tables:
         if len(table.rows) > 0:
             hdr = [cell.text.lower() for cell in table.rows[0].cells]
-            if any("descri" in h or "epi" in h for h in hdr) and any("c.a" in h or "ca" in h for h in hdr):
+            if any("descri" in h or "epi" in h for h in hdr):
                 for row in table.rows[1:]:
                     cells = row.cells
                     desc = cells[0].text.strip() if len(cells) > 0 else ""
@@ -325,7 +330,8 @@ def parse_pre_relatorio(doc):
                     desc = desc.replace("**", "").replace("*", "")
                     if desc and "[informação" not in desc.lower() and desc != "-":
                         epis_extraidos.append({"descricao": desc, "ca": ca, "data_entrega": data, "obs": obs})
-    if epis_extraidos: dados["quadro_epis"] = epis_extraidos
+    if epis_extraidos and not dados.get("quadro_epis"): 
+        dados["quadro_epis"] = epis_extraidos
 
     return dados
 
@@ -415,7 +421,7 @@ with col_titulo:
     st.markdown("<h1 style='margin:0; font-size: 1.7rem;'>Gestão Pericial Trabalhista & Extrajudicial</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color: #64748B; margin:0; font-size: 1rem; font-weight: 500;'>Assistência Técnica, Perícias Judiciais e Laudos Previdenciários.</p>", unsafe_allow_html=True)
 
-st.markdown("<hr style='margin-top: 1rem; margin-bottom: 1.5rem; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
+st.markdown("<hr style='margin:0.5rem 0 1.5rem 0; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
 
 def trocar_menu(acao): st.session_state.menu_opcao = acao
 
@@ -440,8 +446,8 @@ if db_processos:
             id_norm = remover_acentos(k)
             proc_num_norm = remover_acentos(str(v.get("processo_num", "")))
             reclamada_norm = remover_acentos(str(v.get("reclamada_nome", "")))
-            reclamante_norm = remover_acentos(str(v.get("reclamante_nome", "")))
-            if (termo_limpo in id_norm or termo_limpo in proc_num_norm or termo_limpo in reclamada_norm or termo_limpo in reclamante_norm):
+            reclamante_nome = remover_acentos(str(v.get("reclamante_nome", "")))
+            if (termo_limpo in id_norm or termo_limpo in proc_num_norm or termo_limpo in reclamada_norm or termo_limpo in reclamante_nome):
                 processos_filtrados.append(k)
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
@@ -511,7 +517,7 @@ if opcao == "➕ Novo Processo / Caso":
             st.session_state[key_nome] = dados_extraidos.get("reclamante_nome", "") or ""
             st.session_state[key_emp] = dados_extraidos.get("reclamada_nome", "") or ""
             
-            st.success("🤖 Documento lido com sucesso pelo Motor Híbrido!")
+            st.success("🤖 Documento lido com sucesso!")
         except Exception as e:
             st.error(f"Erro ao ler o arquivo: {e}")
 
@@ -668,9 +674,9 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         roles = ["Perito do Juízo", "Assistente Técnico da Reclamante", "Assistente Técnico da Reclamada", "Perito Extrajudicial / Consultor"]
                         atual_role = p_atual.get("papel_profissional", "Perito do Juízo")
                         if atual_role not in roles: roles.append(atual_role)
-                        p_atual["papel_profissional"] = st.selectbox("Meu Papel", roles, index=roles.index(atual_role))
+                        p_atual["papel_profissional"] = st.selectbox("Meu Papel no Processo", roles, index=roles.index(atual_role))
                     with col_p2:
-                        p_atual["tipos_pericia"] = st.multiselect("Tipos de Perícia", ["Insalubridade (NR-15)", "Periculosidade (NR-16)", "Aposentadoria Especial (PPP/LTCAT)"], default=p_atual.get("tipos_pericia", ["Insalubridade (NR-15)"]))
+                        p_atual["tipos_pericia"] = st.multiselect("Tipos de Perícia Envolvidos", ["Insalubridade (NR-15)", "Periculosidade (NR-16)", "Aposentadoria Especial (PPP/LTCAT)"], default=p_atual.get("tipos_pericia", ["Insalubridade (NR-15)"]))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     col1, col2 = st.columns(2)
@@ -683,10 +689,10 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     with col2:
                         p_atual["reclamante_nome"] = st.text_input("Reclamante (Autor/Autora)", value=p_atual.get("reclamante_nome", ""))
                         p_atual["reclamante_cpf"] = st.text_input("CPF do Reclamante", value=p_atual.get("reclamante_cpf", ""))
-                        p_atual["reclamante_adv"] = st.text_input("Advogados do Reclamante", value=p_atual.get("reclamante_adv", ""))
+                        p_atual["reclamante_adv"] = st.text_input("Advogados do Reclamante (Nomes e OAB)", value=p_atual.get("reclamante_adv", ""))
                         p_atual["reclamada_nome"] = st.text_input("Reclamada (Ré / Empresa)", value=p_atual.get("reclamada_nome", ""))
                         p_atual["reclamada_cnpj"] = st.text_input("CNPJ da Reclamada", value=p_atual.get("reclamada_cnpj", ""))
-                        p_atual["reclamada_adv"] = st.text_input("Advogados da Reclamada", value=p_atual.get("reclamada_adv", ""))
+                        p_atual["reclamada_adv"] = st.text_input("Advogados da Reclamada (Nomes e OAB)", value=p_atual.get("reclamada_adv", ""))
 
                     if st.form_submit_button("💾 Salvar Identificação"):
                         salvar_processo(processo_id_selecionado, p_atual)
@@ -698,24 +704,24 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     col3, col4 = st.columns(2)
                     with col3:
                         p_atual["data_admissao"] = st.text_input("Data de Admissão", value=p_atual.get("data_admissao", ""))
-                        p_atual["status_contrato"] = st.text_input("Status do Contrato", value=p_atual.get("status_contrato", ""))
-                        p_atual["periodo_imprescrito"] = st.text_input("Período Imprescrito", value=p_atual.get("periodo_imprescrito", ""))
+                        p_atual["status_contrato"] = st.text_input("Status do Contrato (Demissão / Ativo)", value=p_atual.get("status_contrato", ""))
+                        p_atual["periodo_imprescrito"] = st.text_input("Período Imprescrito (Alvo da Perícia)", value=p_atual.get("periodo_imprescrito", ""))
                         p_atual["cargos"] = st.text_input("Cargo(s) / Função(ões)", value=p_atual.get("cargos", ""))
                     with col4:
                         p_atual["setor"] = st.text_input("Setor / Lotação / Local", value=p_atual.get("setor", ""))
                         p_atual["ultima_remuneracao"] = st.text_input("Última Remuneração", value=p_atual.get("ultima_remuneracao", ""))
 
-                    p_atual["objeto_pericia"] = st.text_input("Objeto da Perícia", value=p_atual.get("objeto_pericia", ""))
+                    p_atual["objeto_pericia"] = st.text_input("Objeto de Análise / Perícia", value=p_atual.get("objeto_pericia", ""))
                     v_ati = p_atual.get("atividades_inicial", "")
                     p_atual["atividades_inicial"] = st.text_area("Atividades Descritas na Inicial", value=v_ati, height=calcula_altura(v_ati, 100))
                     v_age = p_atual.get("agentes_alegados", "")
                     p_atual["agentes_alegados"] = st.text_area("Agentes Nocivos / Riscos Alegados", value=v_age, height=calcula_altura(v_age, 100))
                     v_ped = p_atual.get("pedidos_tecnicos", "")
-                    p_atual["pedidos_tecnicos"] = st.text_area("Pedidos Técnicos", value=v_ped, height=calcula_altura(v_ped, 100))
+                    p_atual["pedidos_tecnicos"] = st.text_area("Pedidos Técnicos (Grau, Enquadramento, PPP)", value=v_ped, height=calcula_altura(v_ped, 100))
                     v_pre = p_atual.get("preliminares_periciais", "")
-                    p_atual["preliminares_periciais"] = st.text_area("Preliminares Periciais", value=v_pre, height=calcula_altura(v_pre, 100))
+                    p_atual["preliminares_periciais"] = st.text_area("Preliminares Periciais (Contestação)", value=v_pre, height=calcula_altura(v_pre, 100))
                     v_def = p_atual.get("defesa_merito_sst", "")
-                    p_atual["defesa_merito_sst"] = st.text_area("Defesa de Mérito SST", value=v_def, height=calcula_altura(v_def, 120))
+                    p_atual["defesa_merito_sst"] = st.text_area("Defesa de Mérito SST (Contestação)", value=v_def, height=calcula_altura(v_def, 120))
 
                     if st.form_submit_button("💾 Salvar Contrato e Sínteses"):
                         salvar_processo(processo_id_selecionado, p_atual)
@@ -728,24 +734,24 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     with col6: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""))
                     with col7: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""))
                     
-                    p_atual["local_diligencia"] = st.text_input("Local da Diligência", value=p_atual.get("local_diligencia", ""))
+                    p_atual["local_diligencia"] = st.text_input("Local / Endereço da Diligência", value=p_atual.get("local_diligencia", ""))
                     
                     v_ltc = p_atual.get("doc_ltcat", "")
-                    p_atual["doc_ltcat"] = st.text_area("LTCAT", value=v_ltc, height=calcula_altura(v_ltc, 90))
+                    p_atual["doc_ltcat"] = st.text_area("Análise do LTCAT", value=v_ltc, height=calcula_altura(v_ltc, 90))
                     v_lau = p_atual.get("doc_laudo", "")
-                    p_atual["doc_laudo"] = st.text_area("Laudos Prévios / Paradigmas", value=v_lau, height=calcula_altura(v_lau, 90))
+                    p_atual["doc_laudo"] = st.text_area("Análise de Laudos Prévios / Paradigmas", value=v_lau, height=calcula_altura(v_lau, 90))
                     v_ppp = p_atual.get("doc_ppp", "")
-                    p_atual["doc_ppp"] = st.text_area("PPP", value=v_ppp, height=calcula_altura(v_ppp, 90))
+                    p_atual["doc_ppp"] = st.text_area("Análise do PPP (Agentes, Responsáveis, EPI)", value=v_ppp, height=calcula_altura(v_ppp, 90))
                     v_pgr = p_atual.get("doc_pgr", "")
-                    p_atual["doc_pgr"] = st.text_area("PGR / PPRA / PCMAT", value=v_pgr, height=calcula_altura(v_pgr, 90))
+                    p_atual["doc_pgr"] = st.text_area("Análise do PGR / PPRA / PCMAT", value=v_pgr, height=calcula_altura(v_pgr, 90))
                     v_dos = p_atual.get("doc_os", "")
                     p_atual["doc_os"] = st.text_area("Ordens de Serviço e Treinamentos", value=v_dos, height=calcula_altura(v_dos, 90))
                     v_aso = p_atual.get("doc_asos", "")
-                    p_atual["doc_asos"] = st.text_area("ASOs / PCMSO", value=v_aso, height=calcula_altura(v_aso, 90))
+                    p_atual["doc_asos"] = st.text_area("ASOs / PCMSO (Aptidão e Riscos)", value=v_aso, height=calcula_altura(v_aso, 90))
                     v_out = p_atual.get("doc_outros", "")
-                    p_atual["doc_outros"] = st.text_area("Outros Documentos", value=v_out, height=calcula_altura(v_out, 90))
+                    p_atual["doc_outros"] = st.text_area("Outros Documentos Relevantes (FISPQs, etc.)", value=v_out, height=calcula_altura(v_out, 90))
 
-                    if st.form_submit_button("💾 Salvar Análise"):
+                    if st.form_submit_button("💾 Salvar Análise de Documentos"):
                         salvar_processo(processo_id_selecionado, p_atual)
 
             with tab4:
@@ -755,7 +761,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                 edited_df = st.data_editor(
                     df_epis,
                     column_config={
-                        "descricao": st.column_config.TextColumn("Descrição do EPI", width="large", required=True),
+                        "descricao": st.column_config.TextColumn("Descrição do EPI fornecido", width="large", required=True),
                         "ca": st.column_config.TextColumn("C.A.", width="small"),
                         "data_entrega": st.column_config.TextColumn("Data Entrega", width="medium"),
                         "obs": st.column_config.TextColumn("Observações", width="large"),
@@ -772,23 +778,23 @@ elif opcao == "✏️ Dados, Escritório & SST":
 
                 with st.form(f"ft_4_epi_{processo_id_selecionado}"):
                     v_epi2 = p_atual.get("analise_epis_critica", "")
-                    p_atual["analise_epis_critica"] = st.text_area("Síntese Crítica de EPIs", value=v_epi2, height=calcula_altura(v_epi2, 180))
-                    if st.form_submit_button("💾 Salvar Síntese"):
+                    p_atual["analise_epis_critica"] = st.text_area("Síntese e Análise Crítica de EPIs", value=v_epi2, height=calcula_altura(v_epi2, 180))
+                    if st.form_submit_button("💾 Salvar Síntese Crítica"):
                         salvar_processo(processo_id_selecionado, p_atual)
 
             with tab5:
-                st.markdown("### 5. Quesitos")
+                st.markdown("### 5. Quesitos Formulados para a Perícia")
                 with st.form(f"ft_5_{processo_id_selecionado}"):
                     v_q1 = p_atual.get("quesitos_juizo", "")
-                    p_atual["quesitos_juizo"] = st.text_area("Quesitos do Juízo", value=v_q1, height=calcula_altura(v_q1, 150))
+                    p_atual["quesitos_juizo"] = st.text_area("9.1. Quesitos do Juízo", value=v_q1, height=calcula_altura(v_q1, 150))
                     v_q2 = p_atual.get("quesitos_autor", "")
-                    p_atual["quesitos_autor"] = st.text_area("Quesitos do Reclamante (Autor/Autora)", value=v_q2, height=calcula_altura(v_q2, 250))
+                    p_atual["quesitos_autor"] = st.text_area("9.2. Quesitos do Reclamante (Autor/Autora)", value=v_q2, height=calcula_altura(v_q2, 250))
                     v_q3 = p_atual.get("quesitos_reu", "")
-                    p_atual["quesitos_reu"] = st.text_area("Quesitos da Reclamada (Ré / Empresa)", value=v_q3, height=calcula_altura(v_q3, 250))
+                    p_atual["quesitos_reu"] = st.text_area("9.3. Quesitos da Reclamada (Ré / Empresa)", value=v_q3, height=calcula_altura(v_q3, 250))
 
-                    if st.form_submit_button("💾 Salvar Quesitos"):
+                    if st.form_submit_button("💾 Salvar Quesitos Literais"):
                         salvar_processo(processo_id_selecionado, p_atual)
-                        st.toast("✅ Salvo!", icon="💾")
+                        st.toast("✅ Quesitos salvos!", icon="💾")
 
 elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
