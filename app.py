@@ -9,11 +9,15 @@ from docx.oxml.ns import nsdecls, qn
 import os
 import re
 import base64
+import io
+import logging
 
 from core.config import LOGO_FILE, criar_dados_padrao
 from core.database import carregar_dados, salvar_processo, excluir_processo, gerar_proximo_id
 from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
+
+logger = logging.getLogger(__name__)
 
 
 # === MOTOR DE EXTRAÇÃO DUPLO (TAGS + NATURAL) ===
@@ -219,7 +223,6 @@ def parse_pre_relatorio(doc):
 
     dados["analise_epis_critica"] = get_multi(r"Síntese e Análise Crítica de EPIs[^\n:]*", paradas)
 
-    paradas_quesitos = [r"\n9\.2\.", r"\n9\.3\.", r"\n10\.\s+LEVANTAMENTOS", r"\nPessoas Presentes"]
     dados["quesitos_juizo"] = get_multi(r"9\.1\.\s+Quesitos do Juízo", [r"\n9\.2\."])
     dados["quesitos_autor"] = get_multi(r"9\.2\.\s+Quesitos do Reclamante.*?", [r"\n9\.3\."])
     dados["quesitos_reu"] = get_multi(r"9\.3\.\s+Quesitos da Reclamada.*?", [r"\n10\.\s+LEVANTAMENTOS", r"\nPessoas Presentes"])
@@ -1182,7 +1185,8 @@ elif opcao == "📄 Gerar Documento Word Final":
                                 run.italic = True
                             adicionar_linha_vazia()
                         except Exception as e:
-                            pass
+                            logger.exception("Falha ao inserir foto %s no documento Word.", idx + 1)
+                            st.warning(f"Não foi possível inserir a foto {idx + 1}: {e}")
 
             buffer = io.BytesIO()
             doc.save(buffer)
