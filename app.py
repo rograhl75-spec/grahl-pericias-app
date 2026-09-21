@@ -104,7 +104,20 @@ def calcula_altura(texto, min_h):
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
     return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
-# === MOTOR DE EXTRAÇÃO DUPLO CORRIGIDO (TAGS + NATURAL) ===
+# FUNÇÃO DE COMPRESSÃO DE IMAGENS (Evita erro de 1MB do Firebase)
+def comprimir_imagem(file_bytes):
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        img.thumbnail((800, 800)) 
+        output = io.BytesIO()
+        img.save(output, format="JPEG", quality=60)
+        return output.getvalue()
+    except Exception:
+        return file_bytes
+
+# === MOTOR DE EXTRAÇÃO DUPLO (TAGS + NATURAL) ===
 def parse_pre_relatorio(doc):
     dados = {}
     texto_completo = ""
@@ -121,7 +134,6 @@ def parse_pre_relatorio(doc):
                 texto_completo += row_text + "\n"
                 linhas.append(row_text)
 
-    # 1. MOTOR DE TAGS DA IA (Prioridade Máxima)
     if "[START_" in texto_completo:
         def extrair_bloco(nome_tag):
             padrao = r"\[START_" + nome_tag + r"\](.*?)\[END_" + nome_tag + r"\]"
@@ -199,7 +211,6 @@ def parse_pre_relatorio(doc):
         dados["quesitos_autor"] = extrair_bloco("QUESITOS_AUTOR")
         dados["quesitos_reu"] = extrair_bloco("QUESITOS_REU")
 
-        # Correção do Bug dos EPIs: Removida a trava rígida do 'CA' que bloqueava o LTCAT
         quadro_epis_texto = extrair_bloco("QUADRO_EPIS")
         epis_extraidos = []
         if quadro_epis_texto:
@@ -218,7 +229,7 @@ def parse_pre_relatorio(doc):
         
         return dados
 
-    # 2. MOTOR DE TEXTO NATURAL (Fallback para documentos sem tags)
+    # MOTOR DE TEXTO NATURAL (Fallback)
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
 
     def get_single(padrao):
@@ -266,8 +277,6 @@ def parse_pre_relatorio(doc):
 
     dados["data_admissao"] = get_single(r"Data de Admissão[^\n:]*|Período Avaliado")
     dados["status_contrato"] = get_single(r"Status do Contrato[^\n:]*")
-    
-    # Correção: O regex "[^\n:]*" absorve parênteses explicativos como "(Alvo da Perícia)"
     dados["periodo_imprescrito"] = get_single(r"Período Imprescrito[^\n:]*")
     
     cargo = get_single(r"Cargo[^\n:]*|Profissão[^\n:]*")
@@ -315,7 +324,6 @@ def parse_pre_relatorio(doc):
     dados["quesitos_autor"] = get_multi(r"9\.2\.\s+Quesitos do Reclamante.*?", [r"\n9\.3\."])
     dados["quesitos_reu"] = get_multi(r"9\.3\.\s+Quesitos da Reclamada.*?", [r"\n10\.\s+LEVANTAMENTOS", r"\nPessoas Presentes"])
 
-    # Extração de EPI no modo Natural (Sem trava do CA)
     epis_extraidos = []
     for table in doc.tables:
         if len(table.rows) > 0:
@@ -796,6 +804,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Quesitos salvos!", icon="💾")
 
+# === ABA DE VISTORIA PERICIAL REFEITA (SEM ST.FORM) ===
 elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
         st.warning("Cadastre ou selecione um caso no menu lateral.")
@@ -804,25 +813,26 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown(f"<div style='background-color: #E2E8F0; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px;'><b style='color: #1B365D;'>Caso Ativo:</b> {processo_id_selecionado} &nbsp;|&nbsp; <b style='color: #1B365D;'>Papel:</b> {p_atual.get('papel_profissional', '')}</div>", unsafe_allow_html=True)
 
         st.markdown("### 🚜 Vistoria Pericial de Campo")
-        with st.form(f"f_campo_{processo_id_selecionado}"):
-            col_c1, col_c2 = st.columns(2)
-            with col_c1: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""))
-            with col_c2: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""))
+        
+        # Textos da vistoria agora estão LIVRES de st.form para não serem apagados ao tirar fotos
+        col_c1, col_c2 = st.columns(2)
+        with col_c1: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"d_{processo_id_selecionado}")
+        with col_c2: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"h_{processo_id_selecionado}")
 
-            p_atual["local_diligencia"] = st.text_input("Endereço da Diligência", value=p_atual.get("local_diligencia", ""))
-            
-            v_pres = p_atual.get("presentes_pericia", "")
-            p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes", value=v_pres, height=calcula_altura(v_pres, 80))
-            v_ca = p_atual.get("campo_declaracoes_autor", "")
-            p_atual["campo_declaracoes_autor"] = st.text_area("Declarações do Segurado / Autor", value=v_ca, height=calcula_altura(v_ca, 120))
-            v_cr = p_atual.get("campo_declaracoes_reu", "")
-            p_atual["campo_declaracoes_reu"] = st.text_area("Declarações do Empregador", value=v_cr, height=calcula_altura(v_cr, 120))
-            v_cm = p_atual.get("campo_medicoes", "")
-            p_atual["campo_medicoes"] = st.text_area("Medições Realizadas", value=v_cm, height=calcula_altura(v_cm, 120))
+        p_atual["local_diligencia"] = st.text_input("Endereço da Diligência", value=p_atual.get("local_diligencia", ""), key=f"e_{processo_id_selecionado}")
+        
+        v_pres = p_atual.get("presentes_pericia", "")
+        p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes", value=v_pres, height=calcula_altura(v_pres, 80), key=f"pp_{processo_id_selecionado}")
+        v_ca = p_atual.get("campo_declaracoes_autor", "")
+        p_atual["campo_declaracoes_autor"] = st.text_area("Declarações do Segurado / Autor", value=v_ca, height=calcula_altura(v_ca, 120), key=f"ca_{processo_id_selecionado}")
+        v_cr = p_atual.get("campo_declaracoes_reu", "")
+        p_atual["campo_declaracoes_reu"] = st.text_area("Declarações do Empregador", value=v_cr, height=calcula_altura(v_cr, 120), key=f"cr_{processo_id_selecionado}")
+        v_cm = p_atual.get("campo_medicoes", "")
+        p_atual["campo_medicoes"] = st.text_area("Medições Realizadas", value=v_cm, height=calcula_altura(v_cm, 120), key=f"cm_{processo_id_selecionado}")
 
-            if st.form_submit_button("💾 Salvar de Campo"):
-                salvar_processo(processo_id_selecionado, p_atual)
-                st.toast("✅ Textos de campo salvos!", icon="💾")
+        if st.button("💾 Salvar Textos de Campo", key=f"btn_salvar_{processo_id_selecionado}"):
+            salvar_processo(processo_id_selecionado, p_atual)
+            st.toast("✅ Textos de campo salvos permanentemente!", icon="💾")
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         st.markdown("#### 📍 Captura Rápida de GPS")
@@ -888,21 +898,22 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### 📸 Captura de Evidências Fotográficas")
         
-        img_camera = st.camera_input("📷 Tirar Foto Direta")
+        img_camera = st.camera_input("📷 Câmera Web (Apenas para Computador)")
         if img_camera is not None:
             file_bytes = img_camera.getvalue()
-            b64_encoded = base64.b64encode(file_bytes).decode('utf-8')
+            bytes_comprimidos = comprimir_imagem(file_bytes)
+            b64_encoded = base64.b64encode(bytes_comprimidos).decode('utf-8')
             gps_auto = st.session_state.get("gps_field_main", "")
             p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
             salvar_processo(processo_id_selecionado, p_atual)
-            st.toast("✅ Foto capturada!", icon="📸")
+            st.toast("✅ Foto comprimida e guardada!", icon="📸")
             st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
         
         col_up1, col_up2 = st.columns([3, 1])
-        with col_up1: fotos_upload = st.file_uploader("📁 Ou Enviar Foto(s) Galeria", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        with col_up1: fotos_upload = st.file_uploader("📸 CÂMERA DO TABLET (Traseira c/ Zoom) ou Galeria", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         with col_up2:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("🗑️ Limpar Todas"):
@@ -914,7 +925,8 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             novas_fotos = False
             for img in fotos_upload:
                 file_bytes = img.getvalue()
-                b64_encoded = base64.b64encode(file_bytes).decode('utf-8')
+                bytes_comprimidos = comprimir_imagem(file_bytes)
+                b64_encoded = base64.b64encode(bytes_comprimidos).decode('utf-8')
                 if not any(f.get("base64") == b64_encoded for f in p_atual["campo_fotos"]):
                     gps_auto = st.session_state.get("gps_field_main", "")
                     p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
