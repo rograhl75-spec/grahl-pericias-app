@@ -9,7 +9,7 @@ _DADOS_PADRAO = {
     "papel_profissional": "Assistente Técnico da Reclamada",
     "processo_num": "",
     "orgao_julgador": "Vara do Trabalho de Londrina - PR",
-    "data_autuacao": datetime.now().strftime("%d/%m/%Y"),
+    "data_autuacao": "",
     "valor_causa": "",
     "rito_processual": "Ordinário / Sumaríssimo",
     "reclamante_nome": "",
@@ -31,7 +31,7 @@ _DADOS_PADRAO = {
     "preliminares_periciais": "",
     "defesa_merito_sst": "",
     "fase_processual": "Aguardando diligência pericial",
-    "campo_data": datetime.now().strftime("%d/%m/%Y"),
+    "campo_data": "",
     "campo_horario": "14:00",
     "local_diligencia": "",
     "presentes_pericia": "",
@@ -66,4 +66,12 @@ _DADOS_PADRAO = {
 
 
 def criar_dados_padrao():
+    dados = copy.deepcopy(_DADOS_PADRAO)
+    data_atual = datetime.now().strftime("%d/%m/%Y")
+    dados["data_autuacao"] = data_atual
+    dados["campo_data"] = data_atual
+    return dados
+
+
+def criar_dados_padrao_persistencia():
     return copy.deepcopy(_DADOS_PADRAO)
