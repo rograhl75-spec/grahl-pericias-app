@@ -6,116 +6,15 @@ from docx.shared import Inches, Cm, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import parse_xml, OxmlElement
 from docx.oxml.ns import nsdecls, qn
-from PIL import Image
-import json
 import os
-import io
 import re
 import base64
-import unicodedata
-from datetime import datetime
 
-# --- CONFIGURAÇÃO FIREBASE NUVEM ---
-import firebase_admin
-from firebase_admin import credentials, firestore
+from core.config import LOGO_FILE, criar_dados_padrao
+from core.database import carregar_dados, salvar_processo, excluir_processo, gerar_proximo_id
+from core.utils import remover_acentos, calcula_altura, comprimir_imagem
+from ui import aplicar_estilos
 
-if not firebase_admin._apps:
-    try:
-        cred_dict = dict(st.secrets["firebase"])
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred)
-    except Exception as e:
-        st.error("Erro ao conectar no Firebase. Verifique o st.secrets.")
-
-db = firestore.client()
-# -----------------------------------
-
-LOGO_FILE = "logo dourado grahl consultoria.png"
-
-dados_padrao = {
-    "modulo_atuacao": "Perícia Judicial Trabalhista",
-    "tipos_pericia": ["Insalubridade (NR-15)", "Aposentadoria Especial (PPP/LTCAT)"],
-    "papel_profissional": "Assistente Técnico da Reclamada",
-    "processo_num": "",
-    "orgao_julgador": "Vara do Trabalho de Londrina - PR",
-    "data_autuacao": datetime.now().strftime("%d/%m/%Y"),
-    "valor_causa": "",
-    "rito_processual": "Ordinário / Sumaríssimo",
-    "reclamante_nome": "",
-    "reclamante_cpf": "",
-    "reclamante_adv": "",
-    "reclamada_nome": "",
-    "reclamada_cnpj": "",
-    "reclamada_adv": "",
-    "data_admissao": "",
-    "status_contrato": "Ativo",
-    "periodo_imprescrito": "",
-    "cargos": "",
-    "setor": "",
-    "ultima_remuneracao": "",
-    "objeto_pericia": "Insalubridade, Periculosidade e/ou Aposentadoria Especial",
-    "atividades_inicial": "",
-    "agentes_alegados": "",
-    "pedidos_tecnicos": "",
-    "preliminares_periciais": "",
-    "defesa_merito_sst": "",
-    "fase_processual": "Aguardando diligência pericial",
-    "campo_data": datetime.now().strftime("%d/%m/%Y"),
-    "campo_horario": "14:00",
-    "local_diligencia": "",
-    "presentes_pericia": "",
-    "doc_ltcat": "",
-    "doc_laudo": "",
-    "doc_ppp": "",
-    "doc_pgr": "",
-    "doc_os": "",
-    "doc_asos": "",
-    "doc_outros": "",
-    "quadro_epis": [], 
-    "analise_epis_critica": "",
-    "quesitos_juizo": "",
-    "quesitos_autor": "",
-    "quesitos_reu": "",
-    "segurado_nascimento": "",
-    "profissao_cargo": "",
-    "relato_inicial": "",
-    "apr_fisicos": "Ruído contínuo ou intermitente (NHO-01)",
-    "apr_quimicos": "Hidrocarbonetos / Solventes / Produtos químicos da atividade",
-    "apr_biologicos": "Agentes biológicos (se aplicável)",
-    "enquadramento_legal_prev": "Decreto 3.048/99 (Anexo IV)",
-    "extemp_layout": False,
-    "extemp_maquinas": False,
-    "extemp_epc": False,
-    "extemp_justificativa": "As condições ambientais, layout e tecnologias mantêm-se inalteradas em relação ao período pretendido (Art. 279, IN 128/2022).",
-    "campo_declaracoes_autor": "",
-    "campo_declaracoes_reu": "",
-    "campo_medicoes": "",
-    "campo_fotos": []
-}
-
-def remover_acentos(texto):
-    if not texto or not isinstance(texto, str): return ""
-    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
-
-def calcula_altura(texto, min_h):
-    if not texto: return min_h
-    texto_str = str(texto)
-    linhas_quebradas = texto_str.count('\n') + 1
-    caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
-    return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
-
-# FUNÇÃO OTIMIZADA DE COMPRESSÃO DE IMAGENS
-def comprimir_imagem(file_bytes):
-    try:
-        img = Image.open(io.BytesIO(file_bytes))
-        if img.mode in ("RGBA", "P"):
-            img = img.convert('RGB')
-        img.thumbnail((1024, 1024)) 
-        output = io.BytesIO()
-        img.save(output, format="JPEG", quality=60, optimize=True)
-        return output.getvalue()
-    except Exception as e:
-        return file_bytes
 
 # === MOTOR DE EXTRAÇÃO DUPLO (TAGS + NATURAL) ===
 def parse_pre_relatorio(doc):
@@ -344,42 +243,6 @@ def parse_pre_relatorio(doc):
 
     return dados
 
-# --- FUNÇÕES DE BANCO DE DADOS EM NUVEM ---
-def carregar_dados():
-    try:
-        docs = db.collection('processos').stream()
-        dados_db = {}
-        for doc in docs:
-            v = doc.to_dict()
-            k = doc.id
-            for k_padrao, v_padrao in dados_padrao.items():
-                if k_padrao not in v: v[k_padrao] = v_padrao
-            dados_db[k] = v
-        return dados_db
-    except:
-        return {}
-
-def salvar_processo(id_proc, dados_proc):
-    try: 
-        db.collection('processos').document(id_proc).set(dados_proc)
-        return True
-    except Exception as e: 
-        st.error(f"Erro Crítico de Rede: {e}")
-        return False
-
-def excluir_processo(id_proc):
-    try: db.collection('processos').document(id_proc).delete()
-    except Exception as e: st.error(f"Erro ao excluir na nuvem: {e}")
-
-def gerar_proximo_id(db_local):
-    numeros = []
-    for k in db_local.keys():
-        if k.startswith("Proc_"):
-            try: numeros.append(int(k.split("_")[1]))
-            except: pass
-    proximo = max(numeros) + 1 if numeros else 1
-    return f"Proc_{proximo:02d}"
-
 icon_config = LOGO_FILE if os.path.exists(LOGO_FILE) else "🛡️"
 st.set_page_config(page_title="Grahl Consultoria - Perícias", page_icon=icon_config, layout="wide")
 
@@ -390,37 +253,7 @@ if "gps_field_main" not in st.session_state: st.session_state.gps_field_main = "
 if "confirmar_exclusao_dupla" not in st.session_state: st.session_state.confirmar_exclusao_dupla = False
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    section[data-testid="stSidebar"] { background-color: #1B365D; padding-top: 1.5rem; }
-    section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3, section[data-testid="stSidebar"] label { color: #FFFFFF !important; }
-    section[data-testid="stSidebar"] .stSelectbox label p { color: #E2E8F0 !important; font-size: 16px !important; font-weight: 600 !important; }
-    section[data-testid="stSidebar"] .stButton button {
-        width: 100% !important; border-radius: 12px !important; padding: 14px 18px !important;
-        font-size: 15px !important; font-weight: 700 !important; color: white !important;
-        border: 2px solid rgba(255,255,255,0.25) !important; box-shadow: 0 4px 6px rgba(0,0,0,0.2) !important;
-        margin-bottom: 10px !important; text-align: left !important; transition: all 0.2s ease;
-    }
-    section[data-testid="stSidebar"] .stButton:nth-of-type(1) button { background-color: #2563EB !important; }
-    section[data-testid="stSidebar"] .stButton:nth-of-type(2) button { background-color: #0D9488 !important; }
-    section[data-testid="stSidebar"] .stButton:nth-of-type(3) button { background-color: #16A34A !important; }
-    section[data-testid="stSidebar"] .stButton:nth-of-type(4) button { background-color: #DC2626 !important; }
-    section[data-testid="stSidebar"] .stButton:nth-of-type(5) button { background-color: #9333EA !important; }
-    section[data-testid="stSidebar"] .stButton button:hover { filter: brightness(1.15) !important; transform: translateY(-2px); }
-    div.block-container { padding-top: 2rem; }
-    h1 { color: #1B365D !important; font-weight: 800 !important; letter-spacing: -0.5px; }
-    h2, h3 { color: #1B365D !important; font-weight: 700 !important; }
-    label, .stTextInput label, .stTextArea label, .stSelectbox label, .stFileUploader label { color: #1B365D !important; font-weight: 700 !important; font-size: 15px !important; }
-    input, textarea { background-color: #FFFFFF !important; border: 1px solid #CBD5E1 !important; border-radius: 8px !important; font-size: 16px !important; }
-    textarea { field-sizing: content !important; }
-    .stButton button { background-color: #1B365D !important; color: white !important; font-weight: 700 !important; border-radius: 8px !important; padding: 0.5rem 1.2rem; border: none; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); transition: all 0.3s ease; }
-    .stButton button:hover { background-color: #2D4A7C !important; }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { background-color: #E2E8F0; border-radius: 8px 8px 0px 0px; color: #1B365D; font-weight: 700; padding: 10px 20px; }
-    .stTabs [aria-selected="true"] { background-color: #1B365D !important; color: white !important; }
-    </style>
-""", unsafe_allow_html=True)
+aplicar_estilos()
 
 db_processos = carregar_dados()
 
@@ -554,7 +387,7 @@ if opcao == "➕ Novo Processo / Caso":
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.form_submit_button("Criar Caso Completo"):
-            p_novo = dados_padrao.copy()
+            p_novo = criar_dados_padrao()
             if parsed:
                 for k, v in parsed.items():
                     if v: p_novo[k] = v
