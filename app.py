@@ -104,17 +104,17 @@ def calcula_altura(texto, min_h):
     caracteres_extras_wrap = sum([len(linha) // 80 for linha in texto_str.split('\n')])
     return max(min_h, (linhas_quebradas + caracteres_extras_wrap) * 24 + 40)
 
-# FUNÇÃO DE COMPRESSÃO DE IMAGENS (Evita erro de 1MB do Firebase)
+# FUNÇÃO OTIMIZADA DE COMPRESSÃO DE IMAGENS
 def comprimir_imagem(file_bytes):
     try:
         img = Image.open(io.BytesIO(file_bytes))
-        if img.mode != 'RGB':
+        if img.mode in ("RGBA", "P"):
             img = img.convert('RGB')
-        img.thumbnail((800, 800)) 
+        img.thumbnail((1024, 1024)) 
         output = io.BytesIO()
-        img.save(output, format="JPEG", quality=60)
+        img.save(output, format="JPEG", quality=60, optimize=True)
         return output.getvalue()
-    except Exception:
+    except Exception as e:
         return file_bytes
 
 # === MOTOR DE EXTRAÇÃO DUPLO (TAGS + NATURAL) ===
@@ -134,6 +134,7 @@ def parse_pre_relatorio(doc):
                 texto_completo += row_text + "\n"
                 linhas.append(row_text)
 
+    # 1. MOTOR DE TAGS DA IA (Prioridade Máxima)
     if "[START_" in texto_completo:
         def extrair_bloco(nome_tag):
             padrao = r"\[START_" + nome_tag + r"\](.*?)\[END_" + nome_tag + r"\]"
@@ -229,7 +230,7 @@ def parse_pre_relatorio(doc):
         
         return dados
 
-    # MOTOR DE TEXTO NATURAL (Fallback)
+    # 2. MOTOR DE TEXTO NATURAL (Fallback para documentos sem tags)
     texto = "\n".join(linhas).replace("**", "").replace("*", "")
 
     def get_single(padrao):
@@ -359,8 +360,12 @@ def carregar_dados():
         return {}
 
 def salvar_processo(id_proc, dados_proc):
-    try: db.collection('processos').document(id_proc).set(dados_proc)
-    except Exception as e: st.error(f"Erro ao salvar na nuvem: {e}")
+    try: 
+        db.collection('processos').document(id_proc).set(dados_proc)
+        return True
+    except Exception as e: 
+        st.error(f"Erro Crítico de Rede: {e}")
+        return False
 
 def excluir_processo(id_proc):
     try: db.collection('processos').document(id_proc).delete()
@@ -804,7 +809,6 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         salvar_processo(processo_id_selecionado, p_atual)
                         st.toast("✅ Quesitos salvos!", icon="💾")
 
-# === ABA DE VISTORIA PERICIAL REFEITA (SEM ST.FORM) ===
 elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
         st.warning("Cadastre ou selecione um caso no menu lateral.")
@@ -814,29 +818,29 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
 
         st.markdown("### 🚜 Vistoria Pericial de Campo")
         
-        # Textos da vistoria agora estão LIVRES de st.form para não serem apagados ao tirar fotos
+        # TEXTOS LIVRES DE FORMULÁRIO (Prevenção de Perda de Dados)
         col_c1, col_c2 = st.columns(2)
-        with col_c1: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"d_{processo_id_selecionado}")
-        with col_c2: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"h_{processo_id_selecionado}")
+        with col_c1: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"cd_{processo_id_selecionado}")
+        with col_c2: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"ch_{processo_id_selecionado}")
 
-        p_atual["local_diligencia"] = st.text_input("Endereço da Diligência", value=p_atual.get("local_diligencia", ""), key=f"e_{processo_id_selecionado}")
+        p_atual["local_diligencia"] = st.text_input("Endereço da Diligência", value=p_atual.get("local_diligencia", ""), key=f"ld_{processo_id_selecionado}")
         
         v_pres = p_atual.get("presentes_pericia", "")
-        p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes", value=v_pres, height=calcula_altura(v_pres, 80), key=f"pp_{processo_id_selecionado}")
+        p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes na Vistoria (Nome e Função)", value=v_pres, height=calcula_altura(v_pres, 80), key=f"pp_{processo_id_selecionado}")
         v_ca = p_atual.get("campo_declaracoes_autor", "")
-        p_atual["campo_declaracoes_autor"] = st.text_area("Declarações do Segurado / Autor", value=v_ca, height=calcula_altura(v_ca, 120), key=f"ca_{processo_id_selecionado}")
+        p_atual["campo_declaracoes_autor"] = st.text_area("Informações prestadas pelo Segurado / Autor", value=v_ca, height=calcula_altura(v_ca, 120), key=f"cda_{processo_id_selecionado}")
         v_cr = p_atual.get("campo_declaracoes_reu", "")
-        p_atual["campo_declaracoes_reu"] = st.text_area("Declarações do Empregador", value=v_cr, height=calcula_altura(v_cr, 120), key=f"cr_{processo_id_selecionado}")
+        p_atual["campo_declaracoes_reu"] = st.text_area("Informações prestadas pelo Empregador / Acompanhante", value=v_cr, height=calcula_altura(v_cr, 120), key=f"cdr_{processo_id_selecionado}")
         v_cm = p_atual.get("campo_medicoes", "")
-        p_atual["campo_medicoes"] = st.text_area("Medições Realizadas", value=v_cm, height=calcula_altura(v_cm, 120), key=f"cm_{processo_id_selecionado}")
+        p_atual["campo_medicoes"] = st.text_area("Medições Realizadas em Campo (Ex: Sonometria NHO-01)", value=v_cm, height=calcula_altura(v_cm, 120), key=f"cm_{processo_id_selecionado}")
 
-        if st.button("💾 Salvar Textos de Campo", key=f"btn_salvar_{processo_id_selecionado}"):
-            salvar_processo(processo_id_selecionado, p_atual)
-            st.toast("✅ Textos de campo salvos permanentemente!", icon="💾")
+        if st.button("💾 Salvar Textos de Campo", type="primary"):
+            if salvar_processo(processo_id_selecionado, p_atual):
+                st.toast("✅ Textos de campo guardados na Nuvem!", icon="💾")
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         st.markdown("#### 📍 Captura Rápida de GPS")
-        gps_input_val = st.text_input("Coordenada GPS Atual:", value=st.session_state.get("gps_field_main", ""), placeholder="GPS_TARGET_FIELD")
+        gps_input_val = st.text_input("Coordenada GPS Atual (Sessão Ativa):", value=st.session_state.get("gps_field_main", ""), placeholder="GPS_TARGET_FIELD")
         if gps_input_val != st.session_state.get("gps_field_main", ""):
             st.session_state.gps_field_main = gps_input_val
 
@@ -898,16 +902,19 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### 📸 Captura de Evidências Fotográficas")
         
+        # CADEADO DE SEGURANÇA (Prevenção de Loop do Streamlit)
         img_camera = st.camera_input("📷 Câmera Web (Apenas para Computador)")
         if img_camera is not None:
             file_bytes = img_camera.getvalue()
             bytes_comprimidos = comprimir_imagem(file_bytes)
             b64_encoded = base64.b64encode(bytes_comprimidos).decode('utf-8')
-            gps_auto = st.session_state.get("gps_field_main", "")
-            p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
-            salvar_processo(processo_id_selecionado, p_atual)
-            st.toast("✅ Foto comprimida e guardada!", icon="📸")
-            st.rerun()
+            
+            if not any(f.get("base64") == b64_encoded for f in p_atual.setdefault("campo_fotos", [])):
+                gps_auto = st.session_state.get("gps_field_main", "")
+                p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
+                if salvar_processo(processo_id_selecionado, p_atual):
+                    st.toast("✅ Foto da Câmera guardada na Nuvem!", icon="📸")
+                    st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
@@ -916,7 +923,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         with col_up1: fotos_upload = st.file_uploader("📸 CÂMERA DO TABLET (Traseira c/ Zoom) ou Galeria", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         with col_up2:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🗑️ Limpar Todas"):
+            if st.button("🗑️ Limpar Todas Fotos"):
                 p_atual["campo_fotos"] = []
                 salvar_processo(processo_id_selecionado, p_atual)
                 st.rerun()
@@ -927,19 +934,21 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 file_bytes = img.getvalue()
                 bytes_comprimidos = comprimir_imagem(file_bytes)
                 b64_encoded = base64.b64encode(bytes_comprimidos).decode('utf-8')
-                if not any(f.get("base64") == b64_encoded for f in p_atual["campo_fotos"]):
+                
+                if not any(f.get("base64") == b64_encoded for f in p_atual.setdefault("campo_fotos", [])):
                     gps_auto = st.session_state.get("gps_field_main", "")
                     p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
                     novas_fotos = True
             if novas_fotos:
-                salvar_processo(processo_id_selecionado, p_atual)
-                st.rerun()
+                if salvar_processo(processo_id_selecionado, p_atual):
+                    st.toast("✅ Foto do Tablet/Galeria guardada na Nuvem!", icon="📸")
+                    st.rerun()
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         col_ger, col_btn_geral = st.columns([2, 1])
         with col_ger: st.markdown(f"#### 🖼️ Gerenciar Fotos ({len(p_atual.get('campo_fotos', []))} fotos):")
         with col_btn_geral:
-            if st.button("⚡ Salvar GPS em Todas"):
+            if st.button("⚡ Salvar GPS em Todas as Fotos"):
                 gps_atual_sessao = st.session_state.get("gps_field_main", "")
                 if gps_atual_sessao:
                     for f_dict in p_atual["campo_fotos"]: f_dict["gps"] = gps_atual_sessao
