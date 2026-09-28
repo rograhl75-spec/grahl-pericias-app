@@ -17,6 +17,24 @@ from core.config import obter_app_config
 logger = logging.getLogger(__name__)
 
 
+def _obter_limite_chars_total(config: dict | None = None) -> int:
+    config = config or obter_app_config()
+    limite_chunk = max(int(config.get("claude_chunk_chars", 120_000)), 1)
+    max_chunks = max(int(config.get("claude_max_chunks", 6)), 1)
+    capacidade_processamento = limite_chunk * max_chunks
+    limite_configurado = int(config.get("max_pdf_chars_total", capacidade_processamento))
+    return min(limite_configurado, capacidade_processamento)
+
+
+def _formatar_erro_limite_chars(tamanho_projetado: int, max_chars_total: int) -> str:
+    return (
+        "O texto consolidado deste lote atingiria cerca de "
+        f"{tamanho_projetado:,} caracteres, acima do limite seguro atual de "
+        f"{max_chars_total:,} para uma única importação. "
+        "Divida os PDFs em lotes menores ou reduza a quantidade de páginas e tente novamente."
+    )
+
+
 @contextmanager
 def _arquivo_pdf_temporario(arquivo, prefixo: str):
     suffix = Path(arquivo.name).suffix or ".pdf"
@@ -81,7 +99,8 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
     """
     texto_consolidado = ""
     total_paginas = 0
-    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 600_000))
+    config = obter_app_config()
+    max_chars_total = _obter_limite_chars_total(config)
     
     for idx, arquivo in enumerate(arquivos_pdf, 1):
         try:
@@ -94,9 +113,7 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
                 cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {arquivo.name}\n{'='*80}\n\n"
                 tamanho_projetado = len(texto_consolidado) + len(cabecalho) + len(texto)
                 if tamanho_projetado > max_chars_total:
-                    raise ValueError(
-                        f"O texto consolidado excede o limite seguro de {max_chars_total:,} caracteres."
-                    )
+                    raise ValueError(_formatar_erro_limite_chars(tamanho_projetado, max_chars_total))
 
                 texto_consolidado += cabecalho + texto
 
