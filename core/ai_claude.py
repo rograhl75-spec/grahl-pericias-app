@@ -3,12 +3,14 @@ Integração com Claude 3.5 Sonnet para extração de dados de processos judicia
 Responsável por enviar PDFs consolidados à IA e retornar dados estruturados.
 """
 
-import anthropic
-import streamlit as st
 import json
 import logging
+import math
 import re
 from typing import Dict, List, Tuple
+
+import anthropic
+import streamlit as st
 
 from core.config import ConfigurationError, obter_api_key_anthropic, obter_app_config
 from core.cost_tracker import registrar_chamada_claude, validar_limite_chamadas_claude
@@ -177,6 +179,35 @@ def _dividir_texto_em_chunks(texto: str, limite_chars: int, max_chunks: int) -> 
     return chunks
 
 
+def _resolver_parametros_chunk(
+    texto_consolidado: str,
+    config: Dict,
+    modo_conservador: bool = False,
+) -> Tuple[int, int, bool]:
+    limite_padrao = int(config.get("claude_chunk_chars", 120_000))
+    max_chunks_padrao = int(config.get("claude_max_chunks", 10))
+    limite_conservador = int(config.get("claude_chunk_chars_conservative", 80_000))
+    max_chunks_conservador = int(config.get("claude_max_chunks_conservative", 15))
+    limite_chars_cloud = int(config.get("cloud_conservative_chars_threshold", 600_000))
+    pdf_count_threshold = int(config.get("cloud_conservative_pdf_count_threshold", 2))
+
+    precisa_conservador = modo_conservador or len(texto_consolidado) >= limite_chars_cloud
+    if not precisa_conservador:
+        return limite_padrao, max_chunks_padrao, False
+
+    limite_escolhido = min(limite_padrao, limite_conservador)
+    chunks_minimos = max(1, math.ceil(len(texto_consolidado) / max(limite_escolhido, 1)))
+    max_chunks_escolhido = max(max_chunks_padrao, max_chunks_conservador, chunks_minimos)
+
+    logger.warning(
+        "Ativando processamento conservador de PDFs (texto=%s chars, limiar_chars=%s, limiar_pdfs=%s)",
+        len(texto_consolidado),
+        limite_chars_cloud,
+        pdf_count_threshold,
+    )
+    return limite_escolhido, max_chunks_escolhido, True
+
+
 def _executar_chamada_claude(
     cliente,
     model: str,
@@ -243,10 +274,13 @@ def _prompt_consolidacao_jsons(prompt_base: str, jsons_parciais: List[Dict]) -> 
     )
 
 
-def estimar_chamadas_necessarias(texto_consolidado: str) -> int:
+def estimar_chamadas_necessarias(texto_consolidado: str, modo_conservador: bool = False) -> int:
     config = obter_app_config()
-    limite_chars = int(config.get("claude_chunk_chars", 120_000))
-    max_chunks = int(config.get("claude_max_chunks", 6))
+    limite_chars, max_chunks, _ = _resolver_parametros_chunk(
+        texto_consolidado=texto_consolidado,
+        config=config,
+        modo_conservador=modo_conservador,
+    )
     chunks = _dividir_texto_em_chunks(texto_consolidado, limite_chars, max_chunks)
     return len(chunks) if len(chunks) == 1 else len(chunks) + 1
 
@@ -254,6 +288,7 @@ def estimar_chamadas_necessarias(texto_consolidado: str) -> int:
 def analisar_processo_judicial(
     texto_consolidado: str,
     processo_id: str = "processo_sem_id",
+    modo_conservador: bool = False,
 ) -> Tuple[Dict, int, int, float, int]:
     """
     Envia texto consolidado dos PDFs para Claude analisar como perícia judicial.
@@ -269,10 +304,17 @@ def analisar_processo_judicial(
         prompt = carregar_prompt_judicial()
         config = obter_app_config()
         model = config.get("claude_model", "claude-3-5-sonnet-20241022")
-        limite_chars = int(config.get("claude_chunk_chars", 120_000))
-        max_chunks = int(config.get("claude_max_chunks", 6))
+        limite_chars, max_chunks, conservador_ativo = _resolver_parametros_chunk(
+            texto_consolidado=texto_consolidado,
+            config=config,
+            modo_conservador=modo_conservador,
+        )
+        if conservador_ativo:
+            st.warning(
+                "⚠️ Ambiente em modo conservador para estabilidade: o processo será analisado em blocos menores."
+            )
         chunks = _dividir_texto_em_chunks(texto_consolidado, limite_chars, max_chunks)
-        chamadas_previstas = estimar_chamadas_necessarias(texto_consolidado)
+        chamadas_previstas = len(chunks) if len(chunks) == 1 else len(chunks) + 1
 
         permitido, chamadas_hoje, limite_chamadas = validar_limite_chamadas_claude(chamadas_previstas)
         if not permitido:
@@ -336,6 +378,7 @@ def analisar_processo_judicial(
 
         return dados_extraidos, total_tokens_entrada, total_tokens_saida, custo_total, chamadas_previstas
     except ValueError as exc:
+        logger.warning("Falha controlada na análise judicial (%s): %s", processo_id, exc)
         st.error(f"❌ {exc}")
         return {}, 0, 0, 0.0, 0
     except anthropic.APIConnectionError as e:

@@ -132,7 +132,18 @@ class ImportJudicialUiTests(unittest.TestCase):
 
         with (
             mock.patch.object(import_judicial_ui, "st", streamlit),
-            mock.patch.object(import_judicial_ui, "obter_app_config", return_value={"max_pdf_files": 5, "max_file_size_mb": 200, "cost_limit_per_day": 250.0, "max_api_calls_per_day": 50}),
+            mock.patch.object(
+                import_judicial_ui,
+                "obter_app_config",
+                return_value={
+                    "max_pdf_files": 5,
+                    "max_file_size_mb": 200,
+                    "cost_limit_per_day": 250.0,
+                    "max_api_calls_per_day": 50,
+                    "cloud_conservative_pdf_count_threshold": 2,
+                    "cloud_conservative_chars_threshold": 600_000,
+                },
+            ),
             mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
             mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=24),
             mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
@@ -142,13 +153,13 @@ class ImportJudicialUiTests(unittest.TestCase):
             mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=1),
             mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 10.0, 250.0)),
             mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", return_value=("texto consolidado", 24)) as consolidar,
-            mock.patch.object(import_judicial_ui, "estimar_chamadas_necessarias", return_value=2),
+            mock.patch.object(import_judicial_ui, "estimar_chamadas_necessarias", return_value=2) as estimar_chamadas,
             mock.patch.object(import_judicial_ui, "validar_limite_chamadas_claude", return_value=(True, 1, 50)),
             mock.patch.object(
                 import_judicial_ui,
                 "analisar_processo_judicial",
                 return_value=({"processo_num": "0001234-56.2024.5.00.0001", "reclamante_nome": "Maria"}, 100, 50, 0.25, 2),
-            ),
+            ) as analisar,
             mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia", return_value=registro_mock),
         ):
             sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
@@ -157,6 +168,61 @@ class ImportJudicialUiTests(unittest.TestCase):
         self.assertEqual(registro, registro_mock)
         self.assertEqual(dados["processo_num"], "0001234-56.2024.5.00.0001")
         consolidar.assert_called_once_with([arquivo_1, arquivo_2])
+        estimar_chamadas.assert_called_once_with("texto consolidado", modo_conservador=True)
+        analisar.assert_called_once_with("texto consolidado", processo_id="Proc_01", modo_conservador=True)
+        self.assertTrue(streamlit.warning.called)
+
+    def test_fluxo_com_texto_grande_ativa_modo_conservador(self):
+        streamlit = mock.Mock()
+        arquivo = mock.Mock(name="uploaded")
+        arquivo.name = "volume_unico.pdf"
+        arquivo.size = 1024
+        streamlit.file_uploader.return_value = [arquivo]
+        streamlit.columns.side_effect = self._mock_columns
+        streamlit.tabs.side_effect = self._mock_tabs
+        streamlit.button.side_effect = [True, False, True, False]
+        streamlit.spinner.return_value = self._streamlit_context()
+
+        with (
+            mock.patch.object(
+                import_judicial_ui,
+                "st",
+                streamlit,
+            ),
+            mock.patch.object(
+                import_judicial_ui,
+                "obter_app_config",
+                return_value={
+                    "max_pdf_files": 5,
+                    "max_file_size_mb": 200,
+                    "cost_limit_per_day": 250.0,
+                    "max_api_calls_per_day": 50,
+                    "cloud_conservative_pdf_count_threshold": 2,
+                    "cloud_conservative_chars_threshold": 600_000,
+                },
+            ),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=24),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=2.0),
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=5.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=10.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=1),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 10.0, 250.0)),
+            mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", return_value=("A" * 700_000, 24)),
+            mock.patch.object(import_judicial_ui, "estimar_chamadas_necessarias", return_value=3) as estimar_chamadas,
+            mock.patch.object(import_judicial_ui, "validar_limite_chamadas_claude", return_value=(True, 1, 50)),
+            mock.patch.object(
+                import_judicial_ui,
+                "analisar_processo_judicial",
+                return_value=({"processo_num": "0001234-56.2024.5.00.0001", "reclamante_nome": "Maria"}, 100, 50, 0.25, 2),
+            ) as analisar,
+            mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia", return_value={"status": "ok"}),
+        ):
+            import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
+
+        estimar_chamadas.assert_called_once_with("A" * 700_000, modo_conservador=True)
+        analisar.assert_called_once_with("A" * 700_000, processo_id="Proc_01", modo_conservador=True)
 
     def test_codigo_alterado_nao_usa_use_container_width(self):
         repo_root = Path(__file__).resolve().parents[1]

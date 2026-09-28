@@ -307,8 +307,23 @@ def exibir_tela_importacao_pdf(
         )
         return False, p_atual, {}
 
+    threshold_conservador_pdf = int(config.get("cloud_conservative_pdf_count_threshold", 2))
+    threshold_conservador_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
+    modo_conservador = (
+        len(uploaded_files) >= threshold_conservador_pdf
+        or len(texto_consolidado) >= threshold_conservador_chars
+    )
+    if modo_conservador:
+        st.warning(
+            "⚠️ Para manter estabilidade no Streamlit Cloud, esta importação entrou automaticamente em modo "
+            "conservador (processamento em blocos menores)."
+        )
+
     try:
-        chamadas_previstas = estimar_chamadas_necessarias(texto_consolidado)
+        chamadas_previstas = estimar_chamadas_necessarias(
+            texto_consolidado,
+            modo_conservador=modo_conservador,
+        )
     except ValueError as exc:
         st.error(f"❌ {exc}")
         st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
@@ -346,6 +361,7 @@ def exibir_tela_importacao_pdf(
         dados_extraidos, tokens_entrada, tokens_saida, custo_real, num_chamadas_claude = analisar_processo_judicial(
             texto_consolidado,
             processo_id=processo_id_selecionado,
+            modo_conservador=modo_conservador,
         )
     except Exception as exc:
         _exibir_erro_processamento(
