@@ -22,6 +22,7 @@ APP_CONFIG_DEFAULTS = {
     "claude_max_chunks": 6,
     "claude_model": "claude-3-5-sonnet-20241022",
     "cost_limit_per_day": 250.00,
+    "usd_brl_exchange_rate": 5.00,
     "environment": "production",
 }
 
@@ -139,6 +140,14 @@ def obter_app_config():
     except Exception:
         pass
     return config
+
+
+def obter_taxa_cambio_usd_brl() -> float:
+    try:
+        taxa = float(obter_app_config().get("usd_brl_exchange_rate", 5.00))
+        return max(taxa, 0.0)
+    except (TypeError, ValueError):
+        return 5.00
 
 
 def obter_api_key_anthropic():

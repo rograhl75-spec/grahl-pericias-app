@@ -13,7 +13,7 @@ from core.pdf_processor import (
     validar_limite_paginas,
 )
 from core.ai_claude import analisar_processo_judicial, estimar_custo, estimar_chamadas_necessarias
-from core.config import obter_app_config
+from core.config import obter_app_config, obter_taxa_cambio_usd_brl
 from core.cost_tracker import (
     criar_registro_importacao_ia,
     validar_limite_diario,
@@ -168,7 +168,8 @@ def exibir_tela_importacao_pdf(
     st.markdown("#### 💰 Passo 3: Estimativa de Custo")
     
     custo_estimado = estimar_custo(num_paginas)
-    custo_estimado_brl = custo_estimado * 5.00  # Conversão USD para BRL
+    taxa_cambio = obter_taxa_cambio_usd_brl()
+    custo_estimado_brl = custo_estimado * taxa_cambio
     
     custo_hoje = calcular_custo_hoje()
     try:
@@ -194,7 +195,10 @@ def exibir_tela_importacao_pdf(
         cor = "🟢" if percentual < 75 else "🟡" if percentual < 90 else "🔴"
         st.metric(f"{cor} Limite de Custo", f"R$ {limite_diario:.2f}")
 
-    st.caption("O limite diário de custo (R$) é validado separadamente do limite diário de chamadas da API Claude.")
+    st.caption(
+        "O limite diário de custo (R$) é validado separadamente do limite diário de chamadas da API Claude. "
+        f"Cotação usada: 1 USD = R$ {taxa_cambio:.2f}."
+    )
 
     col_chamadas1, col_chamadas2, col_chamadas3 = st.columns(3)
     with col_chamadas1:
@@ -205,9 +209,15 @@ def exibir_tela_importacao_pdf(
         st.metric("✅ Chamadas Restantes", max(limite_chamadas - chamadas_hoje, 0))
     
     # Validar limite diário
-    permitido, custo_atual, limite = validar_limite_diario()
+    permitido, custo_atual, limite = validar_limite_diario(custo_estimado_brl)
     if not permitido:
-        st.error(f"❌ Limite diário atingido! Gasto: R$ {custo_atual:.2f}, Limite: R$ {limite:.2f}")
+        st.error(
+            "❌ Esta importação excede o limite diário de custo. "
+            f"Gasto atual: R$ {custo_atual:.2f}, "
+            f"estimativa desta importação: R$ {custo_estimado_brl:.2f}, "
+            f"projeção: R$ {custo_atual + custo_estimado_brl:.2f}, "
+            f"limite: R$ {limite:.2f}."
+        )
         return False, p_atual, {}
     
     # ==================== ETAPA 4: PROCESSAMENTO ====================
@@ -277,7 +287,7 @@ def exibir_tela_importacao_pdf(
         st.error("❌ Erro ao processar com Claude. Tente novamente.")
         return False, p_atual, {}
     
-    custo_real_brl = custo_real * 5.00
+    custo_real_brl = custo_real * taxa_cambio
     
     st.success(f"✅ Análise concluída!")
     

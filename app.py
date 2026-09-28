@@ -11,6 +11,7 @@ import re
 import base64
 import io
 import logging
+import html
 
 from core.config import LOGO_FILE, criar_dados_padrao
 from core.database import (
@@ -19,6 +20,7 @@ from core.database import (
     salvar_processo_com_importacao,
     excluir_processo,
     gerar_proximo_id,
+    estimar_proximo_id_local,
 )
 from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
@@ -260,7 +262,8 @@ if "processo_ativo" not in st.session_state: st.session_state.processo_ativo = N
 if "menu_opcao" not in st.session_state: st.session_state.menu_opcao = "➕ Novo Processo / Caso"
 if "parsed_data" not in st.session_state: st.session_state.parsed_data = {}
 if "gps_field_main" not in st.session_state: st.session_state.gps_field_main = ""
-if "confirmar_exclusao_dupla" not in st.session_state: st.session_state.confirmar_exclusao_dupla = False
+if "confirmar_exclusao_target" not in st.session_state: st.session_state.confirmar_exclusao_target = ""
+if "confirmar_exclusao_input" not in st.session_state: st.session_state.confirmar_exclusao_input = ""
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
 if "importacao_pdf_sucesso" not in st.session_state: st.session_state.importacao_pdf_sucesso = ""
 
@@ -281,6 +284,15 @@ with col_titulo:
 st.markdown("<hr style='margin:0.5rem 0 1.5rem 0; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
 
 def trocar_menu(acao): st.session_state.menu_opcao = acao
+
+
+def salvar_processo_com_feedback(id_proc, dados_proc, sucesso_msg, erro_msg="❌ Não foi possível salvar os dados. Tente novamente."):
+    if salvar_processo(id_proc, dados_proc):
+        if sucesso_msg:
+            st.toast(sucesso_msg, icon="💾")
+        return True
+    st.error(erro_msg)
+    return False
 
 st.sidebar.markdown("<h2 style='color: #FFFFFF; font-size: 1.3rem; margin-bottom: 1rem;'>📁 Painel de Controle</h2>", unsafe_allow_html=True)
 acoes_menu = ["➕ Novo Processo / Caso", "📥 Importar Processo (PDF)", "✏️ Dados, Escritório & SST", "🚜 Diligência de Campo & Fotos", "🗑️ Excluir Processo", "📄 Gerar Documento Word Final"]
@@ -345,7 +357,7 @@ else:
 
 if opcao == "➕ Novo Processo / Caso":
     st.markdown("### Cadastrar Novo Caso ou Processo")
-    proximo_id = gerar_proximo_id(db_processos)
+    proximo_id = estimar_proximo_id_local(db_processos)
     st.info(f"✨ O próximo ID gerado automaticamente é: **{proximo_id}**")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -398,6 +410,7 @@ if opcao == "➕ Novo Processo / Caso":
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.form_submit_button("Criar Caso Completo"):
+            id_novo_processo = gerar_proximo_id(db_processos)
             p_novo = criar_dados_padrao()
             if parsed:
                 for k, v in parsed.items():
@@ -413,13 +426,15 @@ if opcao == "➕ Novo Processo / Caso":
                 p_novo["reclamada_nome"] = p_empresa
                 p_novo["processo_num"] = p_num
             
-            salvar_processo(proximo_id, p_novo)
-            st.session_state.parsed_data = {}
-            st.session_state.uploader_key += 1
-            st.session_state.processo_ativo = proximo_id
-            st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
-            st.toast(f"✅ Caso {proximo_id} criado com sucesso!", icon="💾")
-            st.rerun()
+            if salvar_processo(id_novo_processo, p_novo):
+                st.session_state.parsed_data = {}
+                st.session_state.uploader_key += 1
+                st.session_state.processo_ativo = id_novo_processo
+                st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
+                st.toast(f"✅ Caso {id_novo_processo} criado com sucesso!", icon="💾")
+                st.rerun()
+            else:
+                st.error("❌ Não foi possível criar o novo caso na nuvem.")
 
 elif opcao == "📥 Importar Processo (PDF)":
     processo_importacao_id = processo_id_selecionado
@@ -457,7 +472,10 @@ elif opcao == "✏️ Dados, Escritório & SST":
             st.session_state.importacao_pdf_sucesso = ""
         is_prev = "Previdenciário" in p_atual.get("modulo_atuacao", "")
         
-        st.markdown(f"<div style='background-color: #E2E8F0; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px;'><b style='color: #1B365D;'>Caso Ativo:</b> {processo_id_selecionado} &nbsp;|&nbsp; <b style='color: #1B365D;'>Papel:</b> {p_atual.get('papel_profissional', 'Não Definido')}</div>", unsafe_allow_html=True)
+        st.info(
+            f"Caso Ativo: {processo_id_selecionado} | "
+            f"Papel: {p_atual.get('papel_profissional', 'Não Definido')}"
+        )
         
         if is_prev:
             tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Segurado & Tomador", "2️⃣ APR-HO & Extemporaneidade", "3️⃣ Planilha de EPIs", "4️⃣ Metodologia & Enquadramento"])
@@ -486,8 +504,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["relato_inicial"] = st.text_area("Relato Inicial / Atividades Desenvolvidas pelo Segurado", value=val_relato, height=calcula_altura(val_relato, 120))
                     
                     if st.form_submit_button("💾 Salvar Dados do Segurado"):
-                        salvar_processo(processo_id_selecionado, p_atual)
-                        st.toast("✅ Dados salvos!", icon="💾")
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Dados salvos!",
+                        )
 
             with tab2:
                 st.markdown("### 2. Análise Preliminar de Riscos (APR-HO) & Extemporaneidade")
@@ -508,8 +529,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["extemp_justificativa"] = st.text_area("Fundamentação de Equivalência", value=v_ext, height=calcula_altura(v_ext, 100))
 
                     if st.form_submit_button("💾 Salvar APR"):
-                        salvar_processo(processo_id_selecionado, p_atual)
-                        st.toast("✅ APR salva!", icon="💾")
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ APR salva!",
+                        )
 
             with tab3:
                 st.markdown("### 3. Planilha de EPIs & Eficácia (Tema 555 STF)")
@@ -530,15 +554,22 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     df_clean = edited_df.fillna("")
                     df_clean = df_clean[df_clean["descricao"].astype(str).str.strip() != ""]
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
-                    salvar_processo(processo_id_selecionado, p_atual)
-                    st.toast("✅ Planilha salva!", icon="💾")
+                    salvar_processo_com_feedback(
+                        processo_id_selecionado,
+                        p_atual,
+                        "✅ Planilha salva!",
+                    )
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 with st.form(f"form_prev_epi_{processo_id_selecionado}"):
                     v_epi = p_atual.get("analise_epis_critica", "")
                     p_atual["analise_epis_critica"] = st.text_area("Análise Crítica de EPIs", value=v_epi, height=calcula_altura(v_epi, 120))
                     if st.form_submit_button("💾 Salvar Análise"):
-                        salvar_processo(processo_id_selecionado, p_atual)
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Análise salva!",
+                        )
 
             with tab4:
                 st.markdown("### 4. Metodologia & Enquadramento")
@@ -548,7 +579,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação", value=v_met, height=calcula_altura(v_met, 150))
                     
                     if st.form_submit_button("💾 Salvar Metodologia"):
-                        salvar_processo(processo_id_selecionado, p_atual)
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Metodologia salva!",
+                        )
 
         else:
             tab1, tab2, tab3, tab4, tab5 = st.tabs(["1️⃣ Identificação & Partes", "2️⃣ Contrato & Sínteses", "3️⃣ SST & Documentos", "4️⃣ Planilha de EPIs", "5️⃣ Quesitos"])
@@ -581,8 +616,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         p_atual["reclamada_adv"] = st.text_input("Advogados da Reclamada (Nomes e OAB)", value=p_atual.get("reclamada_adv", ""))
 
                     if st.form_submit_button("💾 Salvar Identificação"):
-                        salvar_processo(processo_id_selecionado, p_atual)
-                        st.toast("✅ Salvo!", icon="💾")
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Salvo!",
+                        )
 
             with tab2:
                 st.markdown("### 2. Contrato & Sínteses")
@@ -610,7 +648,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["defesa_merito_sst"] = st.text_area("Defesa de Mérito SST (Contestação)", value=v_def, height=calcula_altura(v_def, 120))
 
                     if st.form_submit_button("💾 Salvar Contrato e Sínteses"):
-                        salvar_processo(processo_id_selecionado, p_atual)
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Contrato e sínteses salvos!",
+                        )
 
             with tab3:
                 st.markdown("### 3. Vistoria & Análise de Documentos")
@@ -638,7 +680,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["doc_outros"] = st.text_area("Outros Documentos Relevantes (FISPQs, etc.)", value=v_out, height=calcula_altura(v_out, 90))
 
                     if st.form_submit_button("💾 Salvar Análise de Documentos"):
-                        salvar_processo(processo_id_selecionado, p_atual)
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Análise de documentos salva!",
+                        )
 
             with tab4:
                 st.markdown("### 4. Quadro de Fornecimento de EPIs")
@@ -659,14 +705,21 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     df_clean = edited_df.fillna("")
                     df_clean = df_clean[df_clean["descricao"].astype(str).str.strip() != ""]
                     p_atual["quadro_epis"] = df_clean.to_dict('records')
-                    salvar_processo(processo_id_selecionado, p_atual)
-                    st.toast("✅ EPIs salvos!", icon="💾")
+                    salvar_processo_com_feedback(
+                        processo_id_selecionado,
+                        p_atual,
+                        "✅ EPIs salvos!",
+                    )
 
                 with st.form(f"ft_4_epi_{processo_id_selecionado}"):
                     v_epi2 = p_atual.get("analise_epis_critica", "")
                     p_atual["analise_epis_critica"] = st.text_area("Síntese e Análise Crítica de EPIs", value=v_epi2, height=calcula_altura(v_epi2, 180))
                     if st.form_submit_button("💾 Salvar Síntese Crítica"):
-                        salvar_processo(processo_id_selecionado, p_atual)
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Síntese crítica salva!",
+                        )
 
             with tab5:
                 st.markdown("### 5. Quesitos Formulados para a Perícia")
@@ -679,15 +732,21 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["quesitos_reu"] = st.text_area("9.3. Quesitos da Reclamada (Ré / Empresa)", value=v_q3, height=calcula_altura(v_q3, 250))
 
                     if st.form_submit_button("💾 Salvar Quesitos Literais"):
-                        salvar_processo(processo_id_selecionado, p_atual)
-                        st.toast("✅ Quesitos salvos!", icon="💾")
+                        salvar_processo_com_feedback(
+                            processo_id_selecionado,
+                            p_atual,
+                            "✅ Quesitos salvos!",
+                        )
 
 elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
         st.warning("Cadastre ou selecione um caso no menu lateral.")
     else:
         p_atual = db_processos[processo_id_selecionado]
-        st.markdown(f"<div style='background-color: #E2E8F0; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px;'><b style='color: #1B365D;'>Caso Ativo:</b> {processo_id_selecionado} &nbsp;|&nbsp; <b style='color: #1B365D;'>Papel:</b> {p_atual.get('papel_profissional', '')}</div>", unsafe_allow_html=True)
+        st.info(
+            f"Caso Ativo: {processo_id_selecionado} | "
+            f"Papel: {p_atual.get('papel_profissional', '')}"
+        )
 
         st.markdown("### 🚜 Vistoria Pericial de Campo")
         
@@ -798,8 +857,10 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("🗑️ Limpar Todas Fotos"):
                 p_atual["campo_fotos"] = []
-                salvar_processo(processo_id_selecionado, p_atual)
-                st.rerun()
+                if salvar_processo(processo_id_selecionado, p_atual):
+                    st.rerun()
+                else:
+                    st.error("❌ Não foi possível limpar as fotos.")
 
         if fotos_upload:
             novas_fotos = False
@@ -825,8 +886,10 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 gps_atual_sessao = st.session_state.get("gps_field_main", "")
                 if gps_atual_sessao:
                     for f_dict in p_atual["campo_fotos"]: f_dict["gps"] = gps_atual_sessao
-                    salvar_processo(processo_id_selecionado, p_atual)
-                    st.rerun()
+                    if salvar_processo(processo_id_selecionado, p_atual):
+                        st.rerun()
+                    else:
+                        st.error("❌ Não foi possível atualizar o GPS das fotos.")
 
         if not p_atual.get("campo_fotos"):
             st.info("Nenhuma foto cadastrada.")
@@ -840,21 +903,34 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         else:
                             st.warning("[Imagem não encontrada]")
                     with col_dados:
-                        nova_legenda = st.text_input(f"Legenda {idx+1}", value=foto_dict.get("legenda", ""), key=f"lg_{idx}")
-                        novo_gps = st.text_input(f"GPS {idx+1}", value=foto_dict.get("gps", ""), key=f"cg_{idx}", placeholder="GPS_FOTO")
+                        nova_legenda = st.text_input(
+                            f"Legenda {idx+1}",
+                            value=foto_dict.get("legenda", ""),
+                            key=f"lg_{processo_id_selecionado}_{idx}",
+                        )
+                        novo_gps = st.text_input(
+                            f"GPS {idx+1}",
+                            value=foto_dict.get("gps", ""),
+                            key=f"cg_{processo_id_selecionado}_{idx}",
+                            placeholder="GPS_FOTO",
+                        )
                         
                         c_salvar, c_del = st.columns(2)
                         with c_salvar:
                             if st.button(f"💾 Atualizar {idx+1}"):
                                 p_atual["campo_fotos"][idx]["legenda"] = nova_legenda
                                 p_atual["campo_fotos"][idx]["gps"] = novo_gps
-                                salvar_processo(processo_id_selecionado, p_atual)
-                                st.rerun()
+                                if salvar_processo(processo_id_selecionado, p_atual):
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Não foi possível atualizar os dados da foto.")
                         with c_del:
                             if st.button(f"🗑️ Excluir {idx+1}"):
                                 p_atual["campo_fotos"].pop(idx)
-                                salvar_processo(processo_id_selecionado, p_atual)
-                                st.rerun()
+                                if salvar_processo(processo_id_selecionado, p_atual):
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Não foi possível excluir a foto.")
                     st.markdown("---")
 
 elif opcao == "🗑️ Excluir Processo":
@@ -865,22 +941,35 @@ elif opcao == "🗑️ Excluir Processo":
         p_excluir = db_processos[processo_id_selecionado]
         st.error(f"⚠️ Atenção: Você está prestes a excluir o caso **{processo_id_selecionado}**.")
         
-        if not st.session_state.confirmar_exclusao_dupla:
+        if st.session_state.confirmar_exclusao_target != processo_id_selecionado:
             if st.button("🗑️ Solicitar Exclusão Definitiva"):
-                st.session_state.confirmar_exclusao_dupla = True
+                st.session_state.confirmar_exclusao_target = processo_id_selecionado
+                st.session_state.confirmar_exclusao_input = ""
                 st.rerun()
         else:
             st.warning("🚨 TEM CERTEZA ABSOLUTA?")
+            st.caption(
+                f"Confirme digitando o ID exato do caso: `{processo_id_selecionado}`"
+            )
+            confirmacao_id = st.text_input(
+                "Digite o ID para confirmar a exclusão permanente:",
+                key="confirmar_exclusao_input",
+            ).strip()
             col_sim, col_nao = st.columns(2)
             with col_sim:
                 if st.button("🔴 SIM, EXCLUIR PERMANENTEMENTE"):
-                    excluir_processo(processo_id_selecionado)
-                    st.session_state.confirmar_exclusao_dupla = False
-                    st.session_state.processo_ativo = None
-                    st.rerun()
+                    if confirmacao_id != processo_id_selecionado:
+                        st.error("❌ Confirmação inválida. A exclusão foi cancelada.")
+                    else:
+                        excluir_processo(processo_id_selecionado)
+                        st.session_state.confirmar_exclusao_target = ""
+                        st.session_state.confirmar_exclusao_input = ""
+                        st.session_state.processo_ativo = None
+                        st.rerun()
             with col_nao:
                 if st.button("❌ Cancelar"):
-                    st.session_state.confirmar_exclusao_dupla = False
+                    st.session_state.confirmar_exclusao_target = ""
+                    st.session_state.confirmar_exclusao_input = ""
                     st.rerun()
 
 elif opcao == "📄 Gerar Documento Word Final":
@@ -890,7 +979,10 @@ elif opcao == "📄 Gerar Documento Word Final":
     else:
         p = db_processos[processo_id_selecionado]
         is_prev = "Previdenciário" in p.get("modulo_atuacao", "")
-        st.markdown(f"<p style='font-size: 17px;'>Caso: <b>{processo_id_selecionado}</b> — Segurado: <i>{p.get('reclamante_nome', '')}</i></p>", unsafe_allow_html=True)
+        st.markdown(
+            f"**Caso:** {html.escape(str(processo_id_selecionado))} — "
+            f"**Segurado:** {html.escape(str(p.get('reclamante_nome', '')))}"
+        )
         
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("📥 Gerar e Baixar Documento Oficial (.docx)"):

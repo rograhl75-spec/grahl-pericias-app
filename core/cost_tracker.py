@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List
 
-from core.config import obter_app_config
+from core.config import obter_app_config, obter_taxa_cambio_usd_brl
 from core.database import _obter_db
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def criar_registro_importacao_ia(
     tokens_saida = _normalizar_inteiro_nao_negativo(tokens_saida)
     custo_real = _normalizar_float_nao_negativo(custo_real)
     num_chamadas_claude = _normalizar_inteiro_nao_negativo(num_chamadas_claude, 1)
-    custo_brl = custo_real * 5.00
+    custo_brl = custo_real * obter_taxa_cambio_usd_brl()
     return {
         "processo_id": processo_id,
         "data_importacao": datetime.now().isoformat(),
@@ -223,7 +223,7 @@ def calcular_custo_hoje() -> float:
         return 0.0
 
 
-def validar_limite_diario() -> tuple:
+def validar_limite_diario(custo_adicional_brl: float = 0.0) -> tuple:
     """
     Verifica se o limite diário de custo (R$) foi atingido.
     Este limite é sobre GASTO em reais, complementar ao limite de
@@ -233,12 +233,13 @@ def validar_limite_diario() -> tuple:
         Tupla: (permitido: bool, custo_atual: float, limite: float)
     """
     custo_hoje = calcular_custo_hoje()
+    custo_adicional_brl = _normalizar_float_nao_negativo(custo_adicional_brl)
     limite = _normalizar_float_nao_negativo(
         obter_app_config().get("cost_limit_per_day", 250.00),
         250.00,
     )
     
-    return custo_hoje < limite, custo_hoje, limite
+    return (custo_hoje + custo_adicional_brl) <= limite, custo_hoje, limite
 
 
 def registrar_chamada_claude(
