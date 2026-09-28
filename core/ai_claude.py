@@ -108,125 +108,125 @@ REGRAS OBRIGATÓRIAS:
 
 
 def _parsear_json_resposta(conteudo_resposta: str) -> Dict:
-try:
-    return json.loads(conteudo_resposta)
-except json.JSONDecodeError:
-    match = re.search(r'\{.*\}', conteudo_resposta, re.DOTALL)
-    if match:
-        return json.loads(match.group())
-    raise ValueError("Resposta da IA não retornou JSON válido.")
+    try:
+        return json.loads(conteudo_resposta)
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', conteudo_resposta, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        raise ValueError("Resposta da IA não retornou JSON válido.")
 
 
 def _dividir_texto_em_chunks(texto: str, limite_chars: int, max_chunks: int) -> List[str]:
-if len(texto) <= limite_chars:
-    return [texto]
+    if len(texto) <= limite_chars:
+        return [texto]
 
-marcadores = re.split(r'(?=\n--- PÁGINA \d+ ---|\n={80}\nARQUIVO \d+:)', texto)
-segmentos = [segmento for segmento in marcadores if segmento.strip()]
-if not segmentos:
-    segmentos = [texto]
+    marcadores = re.split(r'(?=\n--- PÁGINA \d+ ---|\n={80}\nARQUIVO \d+:)', texto)
+    segmentos = [segmento for segmento in marcadores if segmento.strip()]
+    if not segmentos:
+        segmentos = [texto]
 
-chunks = []
-chunk_atual = ""
+    chunks = []
+    chunk_atual = ""
 
-for segmento in segmentos:
-    if len(segmento) > limite_chars:
-        inicio = 0
-        while inicio < len(segmento):
-            fim = min(inicio + limite_chars, len(segmento))
-            parte = segmento[inicio:fim]
-            if chunk_atual.strip():
-                chunks.append(chunk_atual)
-                chunk_atual = ""
-            chunks.append(parte)
-            inicio = fim
-        continue
+    for segmento in segmentos:
+        if len(segmento) > limite_chars:
+            inicio = 0
+            while inicio < len(segmento):
+                fim = min(inicio + limite_chars, len(segmento))
+                parte = segmento[inicio:fim]
+                if chunk_atual.strip():
+                    chunks.append(chunk_atual)
+                    chunk_atual = ""
+                chunks.append(parte)
+                inicio = fim
+            continue
 
-    if len(chunk_atual) + len(segmento) > limite_chars and chunk_atual.strip():
+        if len(chunk_atual) + len(segmento) > limite_chars and chunk_atual.strip():
+            chunks.append(chunk_atual)
+            chunk_atual = segmento
+        else:
+            chunk_atual += segmento
+
+    if chunk_atual.strip():
         chunks.append(chunk_atual)
-        chunk_atual = segmento
-    else:
-        chunk_atual += segmento
 
-if chunk_atual.strip():
-    chunks.append(chunk_atual)
+    if len(chunks) > max_chunks:
+        raise ValueError(
+            f"O processo gerou {len(chunks)} blocos de análise, acima do limite configurado de {max_chunks}. "
+            "Reduza o volume de PDFs ou ajuste os limites do app."
+        )
 
-if len(chunks) > max_chunks:
-    raise ValueError(
-        f"O processo gerou {len(chunks)} blocos de análise, acima do limite configurado de {max_chunks}. "
-        "Reduza o volume de PDFs ou ajuste os limites do app."
-    )
-
-return chunks
+    return chunks
 
 
 def _executar_chamada_claude(
-cliente,
-model: str,
-conteudo: str,
-processo_id: str,
-etapa: str,
+    cliente,
+    model: str,
+    conteudo: str,
+    processo_id: str,
+    etapa: str,
 ) -> Tuple[str, int, int, float]:
-resposta = cliente.messages.create(
-    model=model,
-    max_tokens=4096,
-    messages=[{"role": "user", "content": conteudo}],
-)
+    resposta = cliente.messages.create(
+        model=model,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": conteudo}],
+    )
 
-tokens_entrada = resposta.usage.input_tokens
-tokens_saida = resposta.usage.output_tokens
-custo_input = (tokens_entrada / 1_000_000) * 3.00
-custo_saida = (tokens_saida / 1_000_000) * 15.00
-custo_real = custo_input + custo_saida
+    tokens_entrada = resposta.usage.input_tokens
+    tokens_saida = resposta.usage.output_tokens
+    custo_input = (tokens_entrada / 1_000_000) * 3.00
+    custo_saida = (tokens_saida / 1_000_000) * 15.00
+    custo_real = custo_input + custo_saida
 
-registrar_chamada_claude(
-    processo_id=processo_id,
-    etapa=etapa,
-    sucesso=True,
-    detalhes={
-        "model": model,
-        "tokens_entrada": tokens_entrada,
-        "tokens_saida": tokens_saida,
-    },
-)
+    registrar_chamada_claude(
+        processo_id=processo_id,
+        etapa=etapa,
+        sucesso=True,
+        detalhes={
+            "model": model,
+            "tokens_entrada": tokens_entrada,
+            "tokens_saida": tokens_saida,
+        },
+    )
 
-return resposta.content[0].text, tokens_entrada, tokens_saida, custo_real
+    return resposta.content[0].text, tokens_entrada, tokens_saida, custo_real
 
 
 def _prompt_chunk_judicial(prompt_base: str, indice: int, total: int, texto_chunk: str) -> str:
-return (
-    f"{prompt_base}\n\n"
-    "Você receberá apenas uma parte dos documentos. Extraia somente o que estiver presente "
-    "neste trecho e use '[Não localizado nos documentos]' para campos ausentes.\n"
-    f"Trecho {indice} de {total}.\n\n"
-    f"---DOCUMENTOS DO PROCESSO (TRECHO {indice}/{total})---\n\n{texto_chunk}"
-)
+    return (
+        f"{prompt_base}\n\n"
+        "Você receberá apenas uma parte dos documentos. Extraia somente o que estiver presente "
+        "neste trecho e use '[Não localizado nos documentos]' para campos ausentes.\n"
+        f"Trecho {indice} de {total}.\n\n"
+        f"---DOCUMENTOS DO PROCESSO (TRECHO {indice}/{total})---\n\n{texto_chunk}"
+    )
 
 
 def _prompt_consolidacao_jsons(prompt_base: str, jsons_parciais: List[Dict]) -> str:
-return (
-    f"{prompt_base}\n\n"
-    "A seguir estão JSONs parciais extraídos de diferentes trechos do mesmo processo. "
-    "Consolide tudo em um único JSON final.\n"
-    "Regras adicionais:\n"
-    "1. Não invente informações.\n"
-    "2. Quando houver conflito, prefira o valor mais específico e completo.\n"
-    "3. Preserve a transcrição literal dos quesitos.\n"
-    "4. Remova duplicidades óbvias em 'quadro_epis'.\n\n"
-    f"JSONS PARCIAIS:\n{json.dumps(jsons_parciais, ensure_ascii=False)}"
-)
+    return (
+        f"{prompt_base}\n\n"
+        "A seguir estão JSONs parciais extraídos de diferentes trechos do mesmo processo. "
+        "Consolide tudo em um único JSON final.\n"
+        "Regras adicionais:\n"
+        "1. Não invente informações.\n"
+        "2. Quando houver conflito, prefira o valor mais específico e completo.\n"
+        "3. Preserve a transcrição literal dos quesitos.\n"
+        "4. Remova duplicidades óbvias em 'quadro_epis'.\n\n"
+        f"JSONS PARCIAIS:\n{json.dumps(jsons_parciais, ensure_ascii=False)}"
+    )
 
 
 def analisar_processo_judicial(
-texto_consolidado: str,
-processo_id: str = "processo_sem_id",
+    texto_consolidado: str,
+    processo_id: str = "processo_sem_id",
 ) -> Tuple[Dict, int, int, float, int]:
-"""
-Envia texto consolidado dos PDFs para Claude analisar como perícia judicial.
-    
-Args:
-    texto_consolidado: Texto de todos os PDFs consolidado
-        
+    """
+    Envia texto consolidado dos PDFs para Claude analisar como perícia judicial.
+
+    Args:
+        texto_consolidado: Texto de todos os PDFs consolidado
+
     Returns:
         Tupla: (dados_extraidos_dict, tokens_entrada, tokens_saida, custo_real, num_chamadas)
     """
