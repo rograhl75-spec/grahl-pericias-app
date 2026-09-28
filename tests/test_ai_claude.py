@@ -17,6 +17,21 @@ class AiClaudeTests(unittest.TestCase):
 
         self.assertEqual(chamadas, 4)
 
+    def test_estimar_chamadas_usa_modo_conservador_quando_ativado(self):
+        texto = "A" * 25
+        config = {
+            "claude_chunk_chars": 20,
+            "claude_max_chunks": 10,
+            "claude_chunk_chars_conservative": 10,
+            "claude_max_chunks_conservative": 20,
+            "cloud_conservative_chars_threshold": 600_000,
+        }
+
+        with mock.patch.object(ai_claude, "obter_app_config", return_value=config):
+            chamadas = ai_claude.estimar_chamadas_necessarias(texto, modo_conservador=True)
+
+        self.assertEqual(chamadas, 4)
+
     def test_limite_consolidado_de_1200000_chars_cabe_em_10_chunks(self):
         texto = "A" * 1_200_000
         config = {"claude_chunk_chars": 120_000, "claude_max_chunks": 10}

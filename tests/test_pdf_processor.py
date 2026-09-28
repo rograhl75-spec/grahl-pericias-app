@@ -65,12 +65,10 @@ class PdfProcessorTests(unittest.TestCase):
         self.assertEqual(len(texto_consolidado), limite)
         self.assertEqual(total_paginas, 42)
 
-    def test_consolidar_multiplos_pdfs_informa_limite_de_caracteres(self):
+    def test_consolidar_multiplos_pdfs_excede_limite_de_caracteres(self):
         arquivo = DummyUpload("processo.pdf", b"%PDF-1.7")
-        streamlit = mock.Mock()
 
         with (
-            mock.patch.object(pdf_processor, "st", streamlit),
             mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_chars_total": 1_200_000}),
             mock.patch.object(
                 pdf_processor,
@@ -78,12 +76,10 @@ class PdfProcessorTests(unittest.TestCase):
                 return_value=("A" * 1_200_000, 15),
             ),
         ):
-            texto_consolidado, total_paginas = pdf_processor.consolidar_multiplos_pdfs([arquivo])
+            with self.assertRaises(ValueError) as exc:
+                pdf_processor.consolidar_multiplos_pdfs([arquivo])
 
-        self.assertEqual(texto_consolidado, "")
-        self.assertEqual(total_paginas, 15)
-        streamlit.error.assert_called_once()
-        mensagem = streamlit.error.call_args[0][0]
+        mensagem = str(exc.exception)
         self.assertIn("1.200.000 caracteres", mensagem)
         self.assertIn("divida o processo em lotes menores", mensagem)
 
