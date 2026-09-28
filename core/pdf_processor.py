@@ -1,0 +1,246 @@
+"""
+Extração de texto de arquivos PDF para análise com Claude.
+Suporta múltiplos PDFs consolidados em um único texto.
+"""
+
+import logging
+from contextlib import contextmanager
+import os
+import tempfile
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import pdfplumber
+import streamlit as st
+
+from core.config import obter_app_config
+
+logger = logging.getLogger(__name__)
+
+
+def _formatar_inteiro(valor: int) -> str:
+    return f"{valor:,}".replace(",", ".")
+
+
+@contextmanager
+def _arquivo_pdf_temporario(arquivo, prefixo: str):
+    suffix = Path(arquivo.name).suffix or ".pdf"
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix=prefixo, dir="/tmp")
+    try:
+        temp.write(arquivo.getbuffer())
+        temp.close()
+        yield temp.name
+    finally:
+        try:
+            os.remove(temp.name)
+        except OSError:
+            pass
+
+
+def extrair_texto_pdf(caminho_pdf: str, max_chars: Optional[int] = None) -> Tuple[str, int]:
+    """
+    Extrai texto completo de um arquivo PDF.
+    
+    Args:
+        caminho_pdf: Caminho do arquivo PDF
+        
+    Returns:
+        Tupla: (texto_extraido, numero_de_paginas)
+    """
+    try:
+        partes_texto = []
+        total_chars = 0
+        num_paginas = 0
+        
+        with pdfplumber.open(caminho_pdf) as pdf:
+            num_paginas = len(pdf.pages)
+            
+            for num_pagina, pagina in enumerate(pdf.pages, 1):
+                texto_pagina = pagina.extract_text()
+                if texto_pagina:
+                    bloco_pagina = f"\n--- PÁGINA {num_pagina} ---\n{texto_pagina}\n"
+                    total_chars += len(bloco_pagina)
+                    if max_chars is not None and total_chars > max_chars:
+                        raise ValueError(
+                            "O conteúdo textual extraído ultrapassou o limite configurado para importação."
+                        )
+                    partes_texto.append(bloco_pagina)
+        
+        logger.info(f"PDF extraído com sucesso: {caminho_pdf} ({num_paginas} páginas)")
+        return "".join(partes_texto), num_paginas
+        
+    except ValueError:
+        raise
+    except pdfplumber.PDFError as e:
+        st.error(f"❌ Erro ao ler PDF: {e}")
+        logger.error(f"Erro ao extrair PDF {caminho_pdf}: {e}")
+        return "", 0
+    except Exception as e:
+        st.error(f"❌ Erro inesperado ao processar PDF: {e}")
+        logger.exception(f"Erro ao processar {caminho_pdf}: {e}")
+        return "", 0
+
+
+def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
+    """
+    Extrai e consolida texto de múltiplos arquivos PDF em um único documento.
+    
+    Args:
+        arquivos_pdf: Lista de objetos de arquivo do Streamlit
+        
+    Returns:
+        Tupla: (texto_consolidado, total_paginas)
+    """
+    partes_consolidadas = []
+    total_chars = 0
+    total_paginas = 0
+    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 1_200_000))
+    
+    for idx, arquivo in enumerate(arquivos_pdf, 1):
+        try:
+            with _arquivo_pdf_temporario(arquivo, f"temp_pdf_{idx}_") as temp_path:
+                chars_restantes = max(max_chars_total - total_chars, 0)
+                texto, num_paginas = extrair_texto_pdf(temp_path, max_chars=chars_restantes)
+
+            if num_paginas <= 0:
+                logger.warning("PDF ignorado por falha de leitura: %s", arquivo.name)
+                st.error(
+                    f"❌ O arquivo '{arquivo.name}' não pôde ser lido ou não possui páginas válidas. "
+                    "Remova-o ou envie uma versão íntegra do PDF."
+                )
+                continue
+
+            if not texto.strip():
+                logger.warning("PDF ignorado por não conter texto extraível: %s", arquivo.name)
+                st.warning(
+                    f"⚠️ O arquivo '{arquivo.name}' não possui texto legível para análise automática. "
+                    "Se ele for digitalizado, gere um PDF com OCR antes de reenviar."
+                )
+                continue
+
+            total_paginas += num_paginas
+
+            cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {arquivo.name}\n{'='*80}\n\n"
+            tamanho_projetado = total_chars + len(cabecalho) + len(texto)
+            if tamanho_projetado > max_chars_total:
+                raise ValueError(
+                    "O texto consolidado dos PDFs ultrapassa o limite de "
+                    f"{_formatar_inteiro(max_chars_total)} caracteres para uma única importação. "
+                    "Remova alguns arquivos, selecione menos páginas ou divida o processo em lotes menores."
+                )
+
+            partes_consolidadas.append(cabecalho)
+            partes_consolidadas.append(texto)
+            total_chars = tamanho_projetado
+
+            logger.info(
+                "PDF consolidado com sucesso",
+                extra={
+                    "arquivo": arquivo.name,
+                    "paginas": num_paginas,
+                    "tamanho_bytes": arquivo.size,
+                },
+            )
+                
+        except ValueError:
+            raise
+        except Exception as e:
+            st.error(f"❌ Erro ao processar {arquivo.name}: {e}")
+            logger.exception("Erro ao consolidar PDF %s", arquivo.name)
+            continue
+    
+    return "".join(partes_consolidadas), total_paginas
+
+
+def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
+    """
+    Valida se os arquivos PDFs são válidos antes do processamento.
+    
+    Args:
+        arquivos_pdf: Lista de objetos de arquivo
+        
+    Returns:
+        Tupla: (válido, mensagem_erro)
+    """
+    config = obter_app_config()
+
+    # Validar quantidade
+    max_arquivos = int(config.get("max_pdf_files", 5))
+    if len(arquivos_pdf) > max_arquivos:
+        return False, f"❌ Máximo de {max_arquivos} PDFs permitidos. Você enviou {len(arquivos_pdf)}."
+    
+    # Validar tamanho total
+    max_size_mb = int(config.get("max_file_size_mb", 200))
+    max_size_bytes = max_size_mb * 1024 * 1024
+    max_por_arquivo_mb = int(config.get("max_single_pdf_size_mb", 75))
+    max_por_arquivo_bytes = max_por_arquivo_mb * 1024 * 1024
+    
+    tamanho_total = sum(arquivo.size for arquivo in arquivos_pdf)
+    if tamanho_total > max_size_bytes:
+        tamanho_total_mb = tamanho_total / (1024 * 1024)
+        return False, f"❌ Tamanho total de {tamanho_total_mb:.1f}MB excede limite de {max_size_mb}MB."
+    
+    # Validar se são PDFs e respeitam o limite por arquivo
+    for arquivo in arquivos_pdf:
+        if arquivo.size > max_por_arquivo_bytes:
+            tamanho_mb = arquivo.size / (1024 * 1024)
+            return False, (
+                f"❌ O arquivo '{arquivo.name}' tem {tamanho_mb:.1f}MB e excede o limite "
+                f"individual de {max_por_arquivo_mb}MB."
+            )
+
+        if not arquivo.name.lower().endswith(".pdf"):
+            return False, f"❌ Arquivo '{arquivo.name}' não é um PDF válido."
+
+        assinatura = bytes(arquivo.getbuffer()[:5])
+        if assinatura != b"%PDF-":
+            return False, f"❌ Arquivo '{arquivo.name}' não possui assinatura válida de PDF."
+    
+    return True, "✅ Validação OK"
+
+
+def validar_limite_paginas(total_paginas: int) -> Tuple[bool, str]:
+    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 3000))
+
+    if total_paginas < 0:
+        return False, "❌ Não foi possível calcular o total de páginas dos PDFs enviados."
+
+    if total_paginas > max_paginas:
+        return False, (
+            f"❌ Os PDFs enviados somam {_formatar_inteiro(total_paginas)} páginas e ultrapassam o limite "
+            f"de importação de {_formatar_inteiro(max_paginas)} páginas. Remova alguns arquivos, "
+            "selecione menos páginas ou divida o processo em lotes menores antes de tentar novamente."
+        )
+
+    return True, ""
+
+
+def calcular_total_paginas(arquivos_pdf: List) -> int:
+    """
+    Calcula o número total de páginas sem extrair texto (apenas validação).
+    
+    Args:
+        arquivos_pdf: Lista de objetos de arquivo
+        
+    Returns:
+        Total de páginas
+    """
+    total = 0
+    encontrou_pdf_valido = False
+    for arquivo in arquivos_pdf:
+        try:
+            with _arquivo_pdf_temporario(arquivo, "temp_count_") as temp_path:
+                with pdfplumber.open(temp_path) as pdf:
+                    if not pdf.pages:
+                        raise ValueError("PDF sem páginas legíveis.")
+                    total += len(pdf.pages)
+                    encontrou_pdf_valido = True
+        except Exception as exc:
+            st.error(f"❌ Não foi possível inspecionar '{arquivo.name}': {exc}")
+            logger.exception("Falha ao calcular páginas do PDF %s", arquivo.name)
+            continue
+
+    if not encontrou_pdf_valido:
+        return -1
+    
+    return total

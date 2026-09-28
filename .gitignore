@@ -1,0 +1,8 @@
+# Ignorar segredos locais e arquivos temporários
+.streamlit/secrets.toml
+**/secrets.toml
+**/.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.DS_Store
+*.log
