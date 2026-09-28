@@ -102,14 +102,19 @@ def excluir_processo(id_proc):
         st.error(f"Erro ao excluir na nuvem: {exc}")
 
 
+def _obter_maior_numero_processo(chaves_processos):
+    maior_numero = 0
+    for chave in chaves_processos:
+        if not isinstance(chave, str) or not chave.startswith("Proc_"):
+            continue
+        sufixo = chave.split("_", 1)[1]
+        if sufixo.isdigit():
+            maior_numero = max(maior_numero, int(sufixo))
+    return maior_numero
+
+
 def estimar_proximo_id_local(db_local):
-    numeros = []
-    for chave in db_local.keys():
-        if chave.startswith("Proc_"):
-            sufixo = chave.split("_", 1)[1]
-            if sufixo.isdigit():
-                numeros.append(int(sufixo))
-    proximo = max(numeros) + 1 if numeros else 1
+    proximo = _obter_maior_numero_processo((db_local or {}).keys()) + 1
     return f"Proc_{proximo:02d}"
 
 
@@ -118,6 +123,7 @@ def gerar_proximo_id(db_local=None):
         db = _obter_db()
         contador_ref = db.collection("app_meta").document("processos_counter")
         transacao = db.transaction()
+        maior_local = _obter_maior_numero_processo((db_local or {}).keys())
 
         @firestore.transactional
         def _incrementar_contador(transaction, ref):
@@ -127,7 +133,7 @@ def gerar_proximo_id(db_local=None):
                 valor = snapshot.to_dict().get("ultimo_numero")
                 if isinstance(valor, int):
                     atual = valor
-            proximo = atual + 1
+            proximo = max(atual, maior_local) + 1
             transaction.set(ref, {"ultimo_numero": proximo}, merge=True)
             return proximo
 
