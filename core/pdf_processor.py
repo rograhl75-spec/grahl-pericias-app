@@ -100,15 +100,15 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
 
                 texto_consolidado += cabecalho + texto
 
-            logger.info(
-                "PDF consolidado com sucesso",
-                extra={
-                    "arquivo": arquivo.name,
-                    "paginas": num_paginas,
-                    "tamanho_bytes": arquivo.size,
-                },
-            )
-                
+                logger.info(
+                    "PDF consolidado com sucesso",
+                    extra={
+                        "arquivo": arquivo.name,
+                        "paginas": num_paginas,
+                        "tamanho_bytes": arquivo.size,
+                    },
+                )
+                    
         except Exception as e:
             st.error(f"❌ Erro ao processar {arquivo.name}: {e}")
             logger.exception("Erro ao consolidar PDF %s", arquivo.name)
@@ -156,7 +156,8 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
 
         if not arquivo.name.lower().endswith(".pdf"):
             return False, f"❌ Arquivo '{arquivo.name}' não é um PDF válido."
-
+        
+        # Verificação da assinatura mágica do PDF
         assinatura = bytes(arquivo.getbuffer()[:5])
         if assinatura != b"%PDF-":
             return False, f"❌ Arquivo '{arquivo.name}' não possui assinatura válida de PDF."
@@ -165,7 +166,7 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
 
 
 def validar_limite_paginas(total_paginas: int) -> Tuple[bool, str]:
-    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 1200))
+    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 3000))
 
     if total_paginas < 0:
         return False, "❌ Não foi possível calcular o total de páginas dos PDFs enviados."
