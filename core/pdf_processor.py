@@ -17,6 +17,10 @@ from core.config import obter_app_config
 logger = logging.getLogger(__name__)
 
 
+def _formatar_inteiro(valor: int) -> str:
+    return f"{valor:,}".replace(",", ".")
+
+
 @contextmanager
 def _arquivo_pdf_temporario(arquivo, prefixo: str):
     suffix = Path(arquivo.name).suffix or ".pdf"
@@ -81,7 +85,7 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
     """
     texto_consolidado = ""
     total_paginas = 0
-    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 600_000))
+    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 1_200_000))
     
     for idx, arquivo in enumerate(arquivos_pdf, 1):
         try:
@@ -95,7 +99,9 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
                 tamanho_projetado = len(texto_consolidado) + len(cabecalho) + len(texto)
                 if tamanho_projetado > max_chars_total:
                     raise ValueError(
-                        f"O texto consolidado excede o limite seguro de {max_chars_total:,} caracteres."
+                        "O texto consolidado dos PDFs ultrapassa o limite de "
+                        f"{_formatar_inteiro(max_chars_total)} caracteres para uma única importação. "
+                        "Remova alguns arquivos, selecione menos páginas ou divida o processo em lotes menores."
                     )
 
                 texto_consolidado += cabecalho + texto
@@ -165,15 +171,16 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
 
 
 def validar_limite_paginas(total_paginas: int) -> Tuple[bool, str]:
-    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 1200))
+    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 3000))
 
     if total_paginas < 0:
         return False, "❌ Não foi possível calcular o total de páginas dos PDFs enviados."
 
     if total_paginas > max_paginas:
         return False, (
-            f"❌ O conjunto possui {total_paginas} páginas e excede o limite seguro "
-            f"de {max_paginas} páginas."
+            f"❌ Os PDFs enviados somam {_formatar_inteiro(total_paginas)} páginas e ultrapassam o limite "
+            f"de importação de {_formatar_inteiro(max_paginas)} páginas. Remova alguns arquivos, "
+            "selecione menos páginas ou divida o processo em lotes menores antes de tentar novamente."
         )
 
     return True, ""
