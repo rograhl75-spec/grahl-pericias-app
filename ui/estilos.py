@@ -32,6 +32,26 @@ def aplicar_estilos():
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] { background-color: #E2E8F0; border-radius: 8px 8px 0px 0px; color: #1B365D; font-weight: 700; padding: 10px 20px; }
     .stTabs [aria-selected="true"] { background-color: #1B365D !important; color: white !important; }
+    .campo-inline-error {
+        color: #B91C1C;
+        font-size: 0.88rem;
+        font-weight: 600;
+        margin: -0.2rem 0 0.5rem 0;
+    }
+    .campo-shortcuts-title {
+        color: #1B365D;
+        font-size: 0.95rem;
+        font-weight: 700;
+        margin: 0.75rem 0 0.5rem 0;
+    }
+    @media (max-width: 768px) {
+        div.block-container { padding: 1rem 0.85rem 3rem 0.85rem; }
+        .stTabs [data-baseweb="tab-list"] { gap: 6px; overflow-x: auto; }
+        .stTabs [data-baseweb="tab"] { min-width: 180px; padding: 10px 14px; }
+        .stButton button {
+            min-height: 44px;
+        }
+    }
     </style>
     """,
         unsafe_allow_html=True,
