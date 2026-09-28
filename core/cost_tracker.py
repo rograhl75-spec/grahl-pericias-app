@@ -7,6 +7,8 @@ import streamlit as st
 import logging
 from datetime import datetime
 from typing import Dict, List
+
+from core.config import obter_app_config
 from core.database import _obter_db
 
 logger = logging.getLogger(__name__)
@@ -36,26 +38,14 @@ def registrar_importacao_ia(
     """
     try:
         db = _obter_db()
-        
-        # Converter custo para reais (aproximação: 1 USD = 5.00 BRL)
-        custo_brl = custo_real * 5.00
-        
-        registro = {
-            "processo_id": processo_id,
-            "data_importacao": datetime.now().isoformat(),
-            "arquivos": nomes_arquivos,
-            "num_arquivos": len(nomes_arquivos),
-            "tokens_entrada": tokens_entrada,
-            "tokens_saida": tokens_saida,
-            "tokens_total": tokens_entrada + tokens_saida,
-            "custo_usd": round(custo_real, 4),
-            "custo_brl": round(custo_brl, 2),
-            "campos_completados": contar_campos_preenchidos(dados_extraidos),
-            "confianca_extracao": calcular_confianca(dados_extraidos),
-            "status": "sucesso"
-        }
-        
-        # Salvar em coleção "importacoes_ia"
+        registro = criar_registro_importacao_ia(
+            processo_id=processo_id,
+            nomes_arquivos=nomes_arquivos,
+            tokens_entrada=tokens_entrada,
+            tokens_saida=tokens_saida,
+            custo_real=custo_real,
+            dados_extraidos=dados_extraidos,
+        )
         db.collection("importacoes_ia").add(registro)
         
         logger.info(f"Importação registrada: {processo_id} - R$ {custo_brl:.2f}")
@@ -65,6 +55,33 @@ def registrar_importacao_ia(
         logger.error(f"Erro ao registrar importação: {e}")
         st.error(f"⚠️ Erro ao registrar custo: {e}")
         return False
+
+
+def criar_registro_importacao_ia(
+    processo_id: str,
+    nomes_arquivos: List[str],
+    tokens_entrada: int,
+    tokens_saida: int,
+    custo_real: float,
+    dados_extraidos: Dict,
+    num_chamadas_claude: int = 1,
+) -> Dict:
+    custo_brl = custo_real * 5.00
+    return {
+        "processo_id": processo_id,
+        "data_importacao": datetime.now().isoformat(),
+        "arquivos": nomes_arquivos,
+        "num_arquivos": len(nomes_arquivos),
+        "tokens_entrada": tokens_entrada,
+        "tokens_saida": tokens_saida,
+        "tokens_total": tokens_entrada + tokens_saida,
+        "custo_usd": round(custo_real, 4),
+        "custo_brl": round(custo_brl, 2),
+        "campos_completados": contar_campos_preenchidos(dados_extraidos),
+        "confianca_extracao": calcular_confianca(dados_extraidos),
+        "num_chamadas_claude": num_chamadas_claude,
+        "status": "sucesso",
+    }
 
 
 def obter_historico_importacoes(limite: int = 50) -> List[Dict]:
@@ -133,7 +150,7 @@ def calcular_custo_mensal() -> Dict:
             "total_tokens": total_tokens,
             "total_custo_brl": round(total_custo_brl, 2),
             "custo_medio_por_processo": round(custo_medio, 2),
-            "limite_diario": st.secrets.get("app", {}).get("cost_limit_per_day", 250.00)
+            "limite_diario": obter_app_config().get("cost_limit_per_day", 250.00),
         }
         
     except Exception as e:
@@ -185,9 +202,48 @@ def validar_limite_diario() -> tuple:
         Tupla: (permitido: bool, custo_atual: float, limite: float)
     """
     custo_hoje = calcular_custo_hoje()
-    limite = st.secrets.get("app", {}).get("cost_limit_per_day", 250.00)
+    limite = obter_app_config().get("cost_limit_per_day", 250.00)
     
     return custo_hoje < limite, custo_hoje, limite
+
+
+def registrar_chamada_claude(
+    processo_id: str,
+    etapa: str,
+    sucesso: bool,
+    detalhes: Dict | None = None,
+):
+    try:
+        registro = {
+            "processo_id": processo_id,
+            "data_chamada": datetime.now().isoformat(),
+            "etapa": etapa,
+            "sucesso": sucesso,
+            "detalhes": detalhes or {},
+        }
+        _obter_db().collection("claude_api_calls").add(registro)
+    except Exception as exc:
+        logger.warning("Não foi possível registrar chamada Claude: %s", exc)
+
+
+def contar_chamadas_claude_hoje() -> int:
+    try:
+        agora = datetime.now()
+        inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        docs = _obter_db().collection("claude_api_calls").where(
+            "data_chamada", ">=", inicio_dia.isoformat()
+        ).stream()
+        return sum(1 for _ in docs)
+    except Exception as exc:
+        logger.error("Erro ao contar chamadas Claude de hoje: %s", exc)
+        return 0
+
+
+def validar_limite_chamadas_claude(chamadas_previstas: int = 1) -> tuple:
+    chamadas_hoje = contar_chamadas_claude_hoje()
+    limite = int(obter_app_config().get("max_api_calls_per_day", 50))
+    permitido = (chamadas_hoje + chamadas_previstas) <= limite
+    return permitido, chamadas_hoje, limite
 
 
 def contar_campos_preenchidos(dados: Dict) -> int:

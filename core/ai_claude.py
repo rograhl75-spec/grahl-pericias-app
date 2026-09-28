@@ -7,8 +7,11 @@ import anthropic
 import streamlit as st
 import json
 import logging
-from typing import Dict, Tuple
-from datetime import datetime
+import re
+from typing import Dict, List, Tuple
+
+from core.config import ConfigurationError, obter_api_key_anthropic, obter_app_config
+from core.cost_tracker import registrar_chamada_claude, validar_limite_chamadas_claude
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +19,10 @@ logger = logging.getLogger(__name__)
 def obter_cliente_anthropic():
     """Inicializa e retorna cliente Anthropic usando API key de st.secrets"""
     try:
-        api_key = st.secrets["anthropic"]["api_key"]
+        api_key = obter_api_key_anthropic()
         return anthropic.Anthropic(api_key=api_key)
-    except KeyError:
-        st.error("❌ Erro: Chave API Anthropic não configurada em st.secrets")
+    except ConfigurationError as exc:
+        st.error(f"❌ Configuração Anthropic inválida: {exc}")
         st.stop()
     except Exception as e:
         st.error(f"❌ Erro ao conectar com Anthropic: {e}")
@@ -104,74 +107,220 @@ REGRAS OBRIGATÓRIAS:
     return prompt
 
 
-def analisar_processo_judicial(texto_consolidado: str) -> Tuple[Dict, int, int, float]:
+def _parsear_json_resposta(conteudo_resposta: str) -> Dict:
+    try:
+        return json.loads(conteudo_resposta)
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', conteudo_resposta, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        raise ValueError("Resposta da IA não retornou JSON válido.")
+
+
+def _dividir_texto_em_chunks(texto: str, limite_chars: int, max_chunks: int) -> List[str]:
+    if len(texto) <= limite_chars:
+        return [texto]
+
+    marcadores = re.split(r'(?=\n--- PÁGINA \d+ ---|\n={80}\nARQUIVO \d+:)', texto)
+    segmentos = [segmento for segmento in marcadores if segmento.strip()]
+    if not segmentos:
+        segmentos = [texto]
+
+    chunks = []
+    chunk_atual = ""
+
+    for segmento in segmentos:
+        if len(segmento) > limite_chars:
+            inicio = 0
+            while inicio < len(segmento):
+                fim = min(inicio + limite_chars, len(segmento))
+                parte = segmento[inicio:fim]
+                if chunk_atual.strip():
+                    chunks.append(chunk_atual)
+                    chunk_atual = ""
+                chunks.append(parte)
+                inicio = fim
+            continue
+
+        if len(chunk_atual) + len(segmento) > limite_chars and chunk_atual.strip():
+            chunks.append(chunk_atual)
+            chunk_atual = segmento
+        else:
+            chunk_atual += segmento
+
+    if chunk_atual.strip():
+        chunks.append(chunk_atual)
+
+    if len(chunks) > max_chunks:
+        raise ValueError(
+            f"O processo gerou {len(chunks)} blocos de análise, acima do limite configurado de {max_chunks}. "
+            "Reduza o volume de PDFs ou ajuste os limites do app."
+        )
+
+    return chunks
+
+
+def _executar_chamada_claude(
+    cliente,
+    model: str,
+    conteudo: str,
+    processo_id: str,
+    etapa: str,
+) -> Tuple[str, int, int, float]:
+    resposta = cliente.messages.create(
+        model=model,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": conteudo}],
+    )
+
+    tokens_entrada = resposta.usage.input_tokens
+    tokens_saida = resposta.usage.output_tokens
+    custo_input = (tokens_entrada / 1_000_000) * 3.00
+    custo_saida = (tokens_saida / 1_000_000) * 15.00
+    custo_real = custo_input + custo_saida
+
+    registrar_chamada_claude(
+        processo_id=processo_id,
+        etapa=etapa,
+        sucesso=True,
+        detalhes={
+            "model": model,
+            "tokens_entrada": tokens_entrada,
+            "tokens_saida": tokens_saida,
+        },
+    )
+
+    return resposta.content[0].text, tokens_entrada, tokens_saida, custo_real
+
+
+def _prompt_chunk_judicial(prompt_base: str, indice: int, total: int, texto_chunk: str) -> str:
+    return (
+        f"{prompt_base}\n\n"
+        "Você receberá apenas uma parte dos documentos. Extraia somente o que estiver presente "
+        "neste trecho e use '[Não localizado nos documentos]' para campos ausentes.\n"
+        f"Trecho {indice} de {total}.\n\n"
+        f"---DOCUMENTOS DO PROCESSO (TRECHO {indice}/{total})---\n\n{texto_chunk}"
+    )
+
+
+def _prompt_consolidacao_jsons(prompt_base: str, jsons_parciais: List[Dict]) -> str:
+    return (
+        f"{prompt_base}\n\n"
+        "A seguir estão JSONs parciais extraídos de diferentes trechos do mesmo processo. "
+        "Consolide tudo em um único JSON final.\n"
+        "Regras adicionais:\n"
+        "1. Não invente informações.\n"
+        "2. Quando houver conflito, prefira o valor mais específico e completo.\n"
+        "3. Preserve a transcrição literal dos quesitos.\n"
+        "4. Remova duplicidades óbvias em 'quadro_epis'.\n\n"
+        f"JSONS PARCIAIS:\n{json.dumps(jsons_parciais, ensure_ascii=False)}"
+    )
+
+
+def analisar_processo_judicial(
+    texto_consolidado: str,
+    processo_id: str = "processo_sem_id",
+) -> Tuple[Dict, int, int, float, int]:
     """
     Envia texto consolidado dos PDFs para Claude analisar como perícia judicial.
-    
+
     Args:
         texto_consolidado: Texto de todos os PDFs consolidado
-        
+
     Returns:
-        Tupla: (dados_extraidos_dict, tokens_entrada, tokens_saida, custo_real)
+        Tupla: (dados_extraidos_dict, tokens_entrada, tokens_saida, custo_real, num_chamadas)
     """
     try:
         cliente = obter_cliente_anthropic()
         prompt = carregar_prompt_judicial()
-        
+        config = obter_app_config()
+        model = config.get("claude_model", "claude-3-5-sonnet-20241022")
+        limite_chars = int(config.get("claude_chunk_chars", 120_000))
+        max_chunks = int(config.get("claude_max_chunks", 6))
+        chunks = _dividir_texto_em_chunks(texto_consolidado, limite_chars, max_chunks)
+        chamadas_previstas = len(chunks) if len(chunks) == 1 else len(chunks) + 1
+
+        permitido, chamadas_hoje, limite_chamadas = validar_limite_chamadas_claude(chamadas_previstas)
+        if not permitido:
+            st.error(
+                "❌ Limite diário de chamadas Claude atingido. "
+                f"Hoje: {chamadas_hoje}, limite: {limite_chamadas}, necessárias: {chamadas_previstas}."
+            )
+            return {}, 0, 0, 0.0, 0
+
+        total_tokens_entrada = 0
+        total_tokens_saida = 0
+        custo_total = 0.0
+
         # Exibir status
         with st.spinner("⏳ Analisando processo com Claude 3.5 Sonnet..."):
-            resposta = cliente.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=4096,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{prompt}\n\n---DOCUMENTOS DO PROCESSO---\n\n{texto_consolidado}"
-                    }
-                ]
-            )
-        
-        # Extrair tokens e conteúdo
-        tokens_entrada = resposta.usage.input_tokens
-        tokens_saida = resposta.usage.output_tokens
-        conteudo_resposta = resposta.content[0].text
-        
-        # Calcular custo
-        # Input: $3.00 por 1M tokens / Output: $15.00 por 1M tokens
-        custo_input = (tokens_entrada / 1_000_000) * 3.00
-        custo_saida = (tokens_saida / 1_000_000) * 15.00
-        custo_real = custo_input + custo_saida
-        
-        # Parsear JSON da resposta
-        try:
-            dados_extraidos = json.loads(conteudo_resposta)
-        except json.JSONDecodeError:
-            # Se não for JSON puro, tentar extrair JSON do texto
-            import re
-            match = re.search(r'\{.*\}', conteudo_resposta, re.DOTALL)
-            if match:
-                dados_extraidos = json.loads(match.group())
+            if len(chunks) == 1:
+                conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
+                    cliente=cliente,
+                    model=model,
+                    conteudo=f"{prompt}\n\n---DOCUMENTOS DO PROCESSO---\n\n{texto_consolidado}",
+                    processo_id=processo_id,
+                    etapa="analise_final",
+                )
+                total_tokens_entrada += tokens_entrada
+                total_tokens_saida += tokens_saida
+                custo_total += custo_real
+                dados_extraidos = _parsear_json_resposta(conteudo_resposta)
             else:
-                st.error("❌ Erro ao parsear resposta da IA")
-                return {}, tokens_entrada, tokens_saida, custo_real
-        
-        logger.info(f"Processo analisado com sucesso. Tokens: {tokens_entrada + tokens_saida}, Custo: R${custo_real:.2f}")
-        
-        return dados_extraidos, tokens_entrada, tokens_saida, custo_real
-        
+                jsons_parciais = []
+                for indice, chunk in enumerate(chunks, start=1):
+                    conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
+                        cliente=cliente,
+                        model=model,
+                        conteudo=_prompt_chunk_judicial(prompt, indice, len(chunks), chunk),
+                        processo_id=processo_id,
+                        etapa=f"analise_chunk_{indice}",
+                    )
+                    total_tokens_entrada += tokens_entrada
+                    total_tokens_saida += tokens_saida
+                    custo_total += custo_real
+                    jsons_parciais.append(_parsear_json_resposta(conteudo_resposta))
+
+                conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
+                    cliente=cliente,
+                    model=model,
+                    conteudo=_prompt_consolidacao_jsons(prompt, jsons_parciais),
+                    processo_id=processo_id,
+                    etapa="consolidacao_final",
+                )
+                total_tokens_entrada += tokens_entrada
+                total_tokens_saida += tokens_saida
+                custo_total += custo_real
+                dados_extraidos = _parsear_json_resposta(conteudo_resposta)
+
+        logger.info(
+            "Processo analisado com sucesso. Chamadas: %s, Tokens: %s, Custo: R$%.2f",
+            chamadas_previstas,
+            total_tokens_entrada + total_tokens_saida,
+            custo_total,
+        )
+
+        return dados_extraidos, total_tokens_entrada, total_tokens_saida, custo_total, chamadas_previstas
+    except ValueError as exc:
+        st.error(f"❌ {exc}")
+        return {}, 0, 0, 0.0, 0
     except anthropic.APIConnectionError as e:
+        registrar_chamada_claude(processo_id, "erro_conexao", False, {"erro": str(e)})
         st.error(f"❌ Erro de conexão com Anthropic: {e}")
-        return {}, 0, 0, 0.0
+        return {}, 0, 0, 0.0, 0
     except anthropic.RateLimitError:
+        registrar_chamada_claude(processo_id, "rate_limit", False, {})
         st.error("❌ Limite de requisições atingido. Tente novamente em alguns segundos.")
-        return {}, 0, 0, 0.0
+        return {}, 0, 0, 0.0, 0
     except anthropic.APIStatusError as e:
+        registrar_chamada_claude(processo_id, "erro_status_api", False, {"erro": str(e)})
         st.error(f"❌ Erro na API Anthropic: {e}")
-        return {}, 0, 0, 0.0
+        return {}, 0, 0, 0.0, 0
     except Exception as e:
+        registrar_chamada_claude(processo_id, "erro_inesperado", False, {"erro": str(e)})
         st.error(f"❌ Erro inesperado: {e}")
         logger.exception(f"Erro ao analisar processo: {e}")
-        return {}, 0, 0, 0.0
+        return {}, 0, 0, 0.0, 0
 
 
 def estimar_custo(num_paginas: int) -> float:
