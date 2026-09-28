@@ -108,17 +108,30 @@ REGRAS OBRIGATÓRIAS:
 
 
 def _parsear_json_resposta(conteudo_resposta: str) -> Dict:
+    if not isinstance(conteudo_resposta, str) or not conteudo_resposta.strip():
+        raise ValueError("Resposta da IA vazia.")
+
+    texto = conteudo_resposta.strip()
     try:
-        return json.loads(conteudo_resposta)
+        dado = json.loads(texto)
+        if isinstance(dado, dict):
+            return dado
     except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', conteudo_resposta, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        logger.error("Resposta da Claude sem JSON válido: %s", conteudo_resposta[:500])
-        raise ValueError("Resposta da IA não retornou JSON válido.")
+        pass
+
+    decoder = json.JSONDecoder()
+    for indice, char in enumerate(texto):
+        if char != "{":
+            continue
+        try:
+            dado, _ = decoder.raw_decode(texto[indice:])
+            if isinstance(dado, dict):
+                return dado
+        except json.JSONDecodeError:
+            continue
+
+    logger.error("Resposta da Claude sem JSON válido: %s", texto[:500])
+    raise ValueError("Resposta da IA não retornou JSON válido.")
 
 
 def _dividir_texto_em_chunks(texto: str, limite_chars: int, max_chunks: int) -> List[str]:
@@ -177,8 +190,17 @@ def _executar_chamada_claude(
         messages=[{"role": "user", "content": conteudo}],
     )
 
-    tokens_entrada = resposta.usage.input_tokens
-    tokens_saida = resposta.usage.output_tokens
+    partes_texto = []
+    for bloco in getattr(resposta, "content", []) or []:
+        texto_bloco = getattr(bloco, "text", None)
+        if isinstance(texto_bloco, str) and texto_bloco.strip():
+            partes_texto.append(texto_bloco)
+    if not partes_texto:
+        raise ValueError("Resposta da IA vazia ou sem conteúdo textual.")
+
+    usage = getattr(resposta, "usage", None)
+    tokens_entrada = int(getattr(usage, "input_tokens", 0) or 0)
+    tokens_saida = int(getattr(usage, "output_tokens", 0) or 0)
     custo_input = (tokens_entrada / 1_000_000) * 3.00
     custo_saida = (tokens_saida / 1_000_000) * 15.00
     custo_real = custo_input + custo_saida
@@ -194,7 +216,7 @@ def _executar_chamada_claude(
         },
     )
 
-    return resposta.content[0].text, tokens_entrada, tokens_saida, custo_real
+    return "\n".join(partes_texto), tokens_entrada, tokens_saida, custo_real
 
 
 def _prompt_chunk_judicial(prompt_base: str, indice: int, total: int, texto_chunk: str) -> str:

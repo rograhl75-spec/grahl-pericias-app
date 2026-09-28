@@ -37,6 +37,41 @@ class ImportJudicialUiTests(unittest.TestCase):
         self.assertEqual(registro, {})
         analisar.assert_not_called()
 
+    def test_bloqueia_quando_custo_projetado_excede_limite(self):
+        streamlit = mock.Mock()
+        coluna = mock.MagicMock()
+        coluna.__enter__.return_value = coluna
+        coluna.__exit__.return_value = False
+
+        def _mock_columns(spec):
+            quantidade = spec if isinstance(spec, int) else len(spec)
+            return tuple(coluna for _ in range(quantidade))
+
+        arquivo = mock.Mock()
+        arquivo.name = "processo.pdf"
+        arquivo.size = 1024
+        streamlit.file_uploader.return_value = [arquivo]
+        streamlit.columns.side_effect = _mock_columns
+
+        with (
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            mock.patch.object(import_judicial_ui, "obter_app_config", return_value={"max_pdf_files": 5, "max_file_size_mb": 200, "cost_limit_per_day": 250.0, "max_api_calls_per_day": 50}),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=100),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=20.0),  # USD
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=6.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=200.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=0),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(False, 200.0, 250.0)),
+        ):
+            sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
+
+        self.assertFalse(sucesso)
+        self.assertEqual(dados, {"foo": "bar"})
+        self.assertEqual(registro, {})
+        self.assertTrue(streamlit.error.called)
+
 
 if __name__ == "__main__":
     unittest.main()

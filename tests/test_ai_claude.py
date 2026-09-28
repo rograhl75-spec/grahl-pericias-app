@@ -24,6 +24,27 @@ class AiClaudeTests(unittest.TestCase):
 
         self.assertEqual(dados["processo_num"], "123")
 
+    def test_parsear_json_resposta_rejeita_texto_sem_json(self):
+        with self.assertRaises(ValueError):
+            ai_claude._parsear_json_resposta("sem json válido aqui")
+
+    def test_executar_chamada_claude_rejeita_resposta_sem_texto(self):
+        cliente = mock.Mock()
+        resposta = mock.Mock()
+        resposta.content = []
+        resposta.usage.input_tokens = 10
+        resposta.usage.output_tokens = 20
+        cliente.messages.create.return_value = resposta
+
+        with self.assertRaises(ValueError):
+            ai_claude._executar_chamada_claude(
+                cliente=cliente,
+                model="claude",
+                conteudo="prompt",
+                processo_id="Proc_01",
+                etapa="teste",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
