@@ -13,6 +13,7 @@ import io
 import logging
 import html
 import json
+from datetime import datetime
 
 from core.config import LOGO_FILE, criar_dados_padrao
 from core.database import (
@@ -23,11 +24,222 @@ from core.database import (
     gerar_proximo_id,
     estimar_proximo_id_local,
 )
+from core.field_records import (
+    FIELD_RECORD_FIELDS,
+    atualizar_campos_memorizados,
+    validar_registro_campo,
+)
 from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
 from ui.import_judicial_ui import exibir_tela_importacao_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def _field_widget_key(field_config: dict, processo_id: str) -> str:
+    return f"{field_config['widget_key_prefix']}_{processo_id}"
+
+
+def _set_field_widget_value(field_config: dict, processo_id: str, value: str) -> None:
+    st.session_state[_field_widget_key(field_config, processo_id)] = value
+
+
+def render_field_error(message: str | None) -> None:
+    if message:
+        st.markdown(
+            f"<div class='campo-inline-error' role='alert'>{html.escape(message)}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_field_draft_support(processo_id: str) -> None:
+    draft_key = f"grahl-campo-draft::{processo_id}"
+    field_map = [
+        {"key": field["key"], "placeholder": field["placeholder"]}
+        for field in FIELD_RECORD_FIELDS
+    ]
+
+    components.html(
+        f"""
+        <style>
+            .campo-draft-status-wrap {{
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                gap:12px;
+                padding:0.6rem 0.8rem;
+                border:1px solid #CBD5E1;
+                border-radius:10px;
+                background:#FFFFFF;
+                font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            }}
+            .campo-draft-status {{
+                color:#334155;
+                font-size:0.9rem;
+                font-weight:600;
+            }}
+            .campo-draft-clear {{
+                background:#F8FAFC;
+                border:1px solid #CBD5E1;
+                border-radius:8px;
+                color:#1E293B;
+                cursor:pointer;
+                font-size:0.85rem;
+                font-weight:700;
+                min-height:40px;
+                padding:0.55rem 0.8rem;
+                white-space:nowrap;
+            }}
+            @media (max-width: 640px) {{
+                .campo-draft-status-wrap {{
+                    align-items:stretch;
+                    flex-direction:column;
+                }}
+                .campo-draft-clear {{
+                    width:100%;
+                }}
+            }}
+        </style>
+        <div class="campo-draft-status-wrap">
+            <div id="campo_draft_status" class="campo-draft-status">Rascunho local automático ativo neste navegador.</div>
+            <button id="campo_draft_clear" type="button" class="campo-draft-clear">Limpar rascunho local</button>
+        </div>
+        <script>
+            (function() {{
+                const storageKey = {json.dumps(draft_key)};
+                const fields = {json.dumps(field_map)};
+                const statusEl = document.getElementById("campo_draft_status");
+                const clearBtn = document.getElementById("campo_draft_clear");
+                const parentDoc = window.parent.document;
+
+                function setStatus(message, color) {{
+                    statusEl.textContent = message;
+                    statusEl.style.color = color || "#334155";
+                }}
+
+                function getField(placeholder) {{
+                    return parentDoc.querySelector(
+                        `textarea[placeholder="${{placeholder}}"], input[placeholder="${{placeholder}}"]`
+                    );
+                }}
+
+                function setNativeValue(target, value) {{
+                    const valueProto = target.tagName === "TEXTAREA"
+                        ? window.parent.HTMLTextAreaElement.prototype
+                        : window.parent.HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(valueProto, "value")?.set;
+                    if (setter) {{
+                        setter.call(target, value);
+                    }} else {{
+                        target.value = value;
+                    }}
+                    target.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                    target.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                }}
+
+                function captureValues() {{
+                    const values = {{}};
+                    let hasContent = false;
+                    fields.forEach((field) => {{
+                        const target = getField(field.placeholder);
+                        if (!target) {{
+                            return;
+                        }}
+                        values[field.key] = target.value || "";
+                        if ((target.value || "").trim()) {{
+                            hasContent = true;
+                        }}
+                    }});
+                    return {{ values, hasContent }};
+                }}
+
+                function saveDraft() {{
+                    const snapshot = captureValues();
+                    if (!snapshot.hasContent) {{
+                        window.parent.localStorage.removeItem(storageKey);
+                        setStatus("Rascunho local automático ativo neste navegador.", "#334155");
+                        return;
+                    }}
+
+                    const payload = {{
+                        values: snapshot.values,
+                        updatedAt: new Date().toISOString(),
+                    }};
+                    window.parent.localStorage.setItem(storageKey, JSON.stringify(payload));
+                    setStatus("Rascunho local salvo automaticamente neste navegador.", "#166534");
+                }}
+
+                function restoreDraft() {{
+                    const raw = window.parent.localStorage.getItem(storageKey);
+                    if (!raw) {{
+                        return;
+                    }}
+
+                    let payload;
+                    try {{
+                        payload = JSON.parse(raw);
+                    }} catch (error) {{
+                        window.parent.localStorage.removeItem(storageKey);
+                        return;
+                    }}
+
+                    let restored = 0;
+                    fields.forEach((field) => {{
+                        const target = getField(field.placeholder);
+                        const nextValue = payload?.values?.[field.key] || "";
+                        if (!target || !nextValue || (target.value || "").trim()) {{
+                            return;
+                        }}
+                        setNativeValue(target, nextValue);
+                        restored += 1;
+                    }});
+
+                    if (restored) {{
+                        const updatedAt = payload.updatedAt
+                            ? new Date(payload.updatedAt).toLocaleString("pt-BR")
+                            : "agora";
+                        setStatus(`Rascunho local restaurado automaticamente (${{
+                            restored
+                        }} campo(s), atualizado em ${{updatedAt}}.`, "#0f766e");
+                    }}
+                }}
+
+                function bindInputs() {{
+                    let ready = 0;
+                    fields.forEach((field) => {{
+                        const target = getField(field.placeholder);
+                        if (!target) {{
+                            return;
+                        }}
+                        ready += 1;
+                        if (target.dataset.campoDraftBound === "1") {{
+                            return;
+                        }}
+                        target.dataset.campoDraftBound = "1";
+                        target.addEventListener("input", saveDraft);
+                        target.addEventListener("change", saveDraft);
+                    }});
+                    return ready;
+                }}
+
+                clearBtn.addEventListener("click", function() {{
+                    window.parent.localStorage.removeItem(storageKey);
+                    setStatus("Rascunho local removido deste navegador.", "#b45309");
+                }});
+
+                const setup = window.setInterval(function() {{
+                    if (bindInputs() === fields.length) {{
+                        restoreDraft();
+                        saveDraft();
+                        window.clearInterval(setup);
+                        window.setInterval(saveDraft, 4000);
+                    }}
+                }}, 500);
+            }})();
+        </script>
+        """,
+        height=88,
+    )
 
 
 def render_voice_dictation_control(widget_placeholder: str, field_label: str, control_key: str) -> None:
@@ -38,13 +250,24 @@ def render_voice_dictation_control(widget_placeholder: str, field_label: str, co
 
     components.html(
         f"""
-        <div style="display:flex; align-items:center; gap:8px; margin:0.15rem 0 0.8rem 0;">
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0.15rem 0 0.8rem 0;">
             <button id="{btn_id}" type="button" aria-label="Ditado por voz para {html.escape(field_label)}"
-                style="border:1px solid #cbd5e1; border-radius:8px; padding:6px 10px; cursor:pointer; background:#ffffff; font-size:14px;">
+                style="border:1px solid #cbd5e1; border-radius:8px; padding:8px 12px; min-height:44px; cursor:pointer; background:#ffffff; font-size:14px;">
                 🎤 Ditar
             </button>
             <span id="{status_id}" style="font-size:12px; color:#334155;">Toque para ditar.</span>
         </div>
+        <style>
+            @media (max-width: 640px) {{
+                #{btn_id} {{
+                    width: 100%;
+                    justify-content: center;
+                }}
+                #{status_id} {{
+                    width: 100%;
+                }}
+            }}
+        </style>
         <script>
             (function() {{
                 const btn = document.getElementById({json.dumps(btn_id)});
@@ -386,6 +609,7 @@ if "confirmar_exclusao_target" not in st.session_state: st.session_state.confirm
 if "confirmar_exclusao_input" not in st.session_state: st.session_state.confirmar_exclusao_input = ""
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
 if "importacao_pdf_sucesso" not in st.session_state: st.session_state.importacao_pdf_sucesso = ""
+if "campo_valores_memorizados" not in st.session_state: st.session_state.campo_valores_memorizados = {}
 
 aplicar_estilos()
 
@@ -869,99 +1093,137 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         )
 
         st.markdown("### 🚜 Vistoria Pericial de Campo")
-        st.caption("Use teclado, voz ou ambos no mesmo campo. O ditado usa reconhecimento de voz do navegador (quando disponível).")
-        
-        # TEXTOS LIVRES DE FORMULÁRIO (Prevenção de Perda de Dados)
-        ph_data = "Digite ou dite a data da vistoria"
-        ph_horario = "Digite ou dite o horário da vistoria"
-        ph_local = "Digite ou dite o endereço da diligência"
-        ph_presentes = "Digite ou dite as pessoas presentes na vistoria"
-        ph_autor = "Digite ou dite as informações do segurado/autor"
-        ph_reu = "Digite ou dite as informações do empregador/acompanhante"
-        ph_medicoes = "Digite ou dite as medições realizadas em campo"
+        st.caption("Campos marcados com * são obrigatórios. Você pode digitar, usar voz ou combinar os dois no mesmo campo.")
+        render_field_draft_support(processo_id_selecionado)
 
-        col_c1, col_c2 = st.columns(2)
+        validation_errors_key = f"campo_validation_errors_{processo_id_selecionado}"
+        campo_errors = st.session_state.get(validation_errors_key, {})
+        remembered_fields = st.session_state.campo_valores_memorizados
+        if campo_errors:
+            valores_atuais = {
+                field["key"]: st.session_state.get(
+                    _field_widget_key(field, processo_id_selecionado),
+                    p_atual.get(field["key"], ""),
+                )
+                for field in FIELD_RECORD_FIELDS
+            }
+            campo_errors = {
+                key: value
+                for key, value in campo_errors.items()
+                if key in validar_registro_campo(valores_atuais)
+            }
+            st.session_state[validation_errors_key] = campo_errors
+
+        st.markdown("<div class='campo-shortcuts-title'>Atalhos rápidos</div>", unsafe_allow_html=True)
+        shortcut_cols = st.columns(4, gap="small")
+        with shortcut_cols[0]:
+            if st.button("📅 Usar hoje", key=f"campo_hoje_{processo_id_selecionado}", use_container_width=True):
+                _set_field_widget_value(
+                    FIELD_RECORD_FIELDS[0],
+                    processo_id_selecionado,
+                    datetime.now().strftime("%d/%m/%Y"),
+                )
+        with shortcut_cols[1]:
+            if st.button("🕒 Usar agora", key=f"campo_agora_{processo_id_selecionado}", use_container_width=True):
+                _set_field_widget_value(
+                    FIELD_RECORD_FIELDS[1],
+                    processo_id_selecionado,
+                    datetime.now().strftime("%H:%M"),
+                )
+        with shortcut_cols[2]:
+            if st.button(
+                "↺ Último local",
+                key=f"campo_local_{processo_id_selecionado}",
+                use_container_width=True,
+                disabled=not remembered_fields.get("local_diligencia"),
+            ):
+                _set_field_widget_value(
+                    FIELD_RECORD_FIELDS[2],
+                    processo_id_selecionado,
+                    remembered_fields.get("local_diligencia", ""),
+                )
+        with shortcut_cols[3]:
+            if st.button(
+                "↺ Últimos presentes",
+                key=f"campo_presentes_{processo_id_selecionado}",
+                use_container_width=True,
+                disabled=not remembered_fields.get("presentes_pericia"),
+            ):
+                _set_field_widget_value(
+                    FIELD_RECORD_FIELDS[3],
+                    processo_id_selecionado,
+                    remembered_fields.get("presentes_pericia", ""),
+                )
+
+        date_field, time_field = FIELD_RECORD_FIELDS[0], FIELD_RECORD_FIELDS[1]
+        col_c1, col_c2 = st.columns(2, gap="small")
         with col_c1:
-            p_atual["campo_data"] = st.text_input(
-                "Data da Vistoria",
-                value=p_atual.get("campo_data", ""),
-                key=f"cd_{processo_id_selecionado}",
-                placeholder=ph_data,
+            p_atual[date_field["key"]] = st.text_input(
+                date_field["label"],
+                value=p_atual.get(date_field["key"], ""),
+                key=_field_widget_key(date_field, processo_id_selecionado),
+                placeholder=date_field["placeholder"],
             )
-            render_voice_dictation_control(ph_data, "Data da Vistoria", f"cd_{processo_id_selecionado}")
+            render_field_error(campo_errors.get(date_field["key"]))
+            render_voice_dictation_control(
+                date_field["placeholder"],
+                date_field["voice_label"],
+                _field_widget_key(date_field, processo_id_selecionado),
+            )
         with col_c2:
-            p_atual["campo_horario"] = st.text_input(
-                "Horário da Vistoria",
-                value=p_atual.get("campo_horario", ""),
-                key=f"ch_{processo_id_selecionado}",
-                placeholder=ph_horario,
+            p_atual[time_field["key"]] = st.text_input(
+                time_field["label"],
+                value=p_atual.get(time_field["key"], ""),
+                key=_field_widget_key(time_field, processo_id_selecionado),
+                placeholder=time_field["placeholder"],
             )
-            render_voice_dictation_control(ph_horario, "Horário da Vistoria", f"ch_{processo_id_selecionado}")
+            render_field_error(campo_errors.get(time_field["key"]))
+            render_voice_dictation_control(
+                time_field["placeholder"],
+                time_field["voice_label"],
+                _field_widget_key(time_field, processo_id_selecionado),
+            )
 
-        p_atual["local_diligencia"] = st.text_input(
-            "Endereço da Diligência",
-            value=p_atual.get("local_diligencia", ""),
-            key=f"ld_{processo_id_selecionado}",
-            placeholder=ph_local,
-        )
-        render_voice_dictation_control(ph_local, "Endereço da Diligência", f"ld_{processo_id_selecionado}")
-        
-        v_pres = p_atual.get("presentes_pericia", "")
-        p_atual["presentes_pericia"] = st.text_area(
-            "Pessoas Presentes na Vistoria (Nome e Função)",
-            value=v_pres,
-            height=calcula_altura(v_pres, 80),
-            key=f"pp_{processo_id_selecionado}",
-            placeholder=ph_presentes,
-        )
-        render_voice_dictation_control(
-            ph_presentes,
-            "Pessoas Presentes na Vistoria (Nome e Função)",
-            f"pp_{processo_id_selecionado}",
-        )
-        v_ca = p_atual.get("campo_declaracoes_autor", "")
-        p_atual["campo_declaracoes_autor"] = st.text_area(
-            "Informações prestadas pelo Segurado / Autor",
-            value=v_ca,
-            height=calcula_altura(v_ca, 120),
-            key=f"cda_{processo_id_selecionado}",
-            placeholder=ph_autor,
-        )
-        render_voice_dictation_control(
-            ph_autor,
-            "Informações prestadas pelo Segurado / Autor",
-            f"cda_{processo_id_selecionado}",
-        )
-        v_cr = p_atual.get("campo_declaracoes_reu", "")
-        p_atual["campo_declaracoes_reu"] = st.text_area(
-            "Informações prestadas pelo Empregador / Acompanhante",
-            value=v_cr,
-            height=calcula_altura(v_cr, 120),
-            key=f"cdr_{processo_id_selecionado}",
-            placeholder=ph_reu,
-        )
-        render_voice_dictation_control(
-            ph_reu,
-            "Informações prestadas pelo Empregador / Acompanhante",
-            f"cdr_{processo_id_selecionado}",
-        )
-        v_cm = p_atual.get("campo_medicoes", "")
-        p_atual["campo_medicoes"] = st.text_area(
-            "Medições Realizadas em Campo (Ex: Sonometria NHO-01)",
-            value=v_cm,
-            height=calcula_altura(v_cm, 120),
-            key=f"cm_{processo_id_selecionado}",
-            placeholder=ph_medicoes,
-        )
-        render_voice_dictation_control(
-            ph_medicoes,
-            "Medições Realizadas em Campo (Ex: Sonometria NHO-01)",
-            f"cm_{processo_id_selecionado}",
-        )
+        for field in FIELD_RECORD_FIELDS[2:]:
+            if field["widget"] == "text_input":
+                p_atual[field["key"]] = st.text_input(
+                    field["label"],
+                    value=p_atual.get(field["key"], ""),
+                    key=_field_widget_key(field, processo_id_selecionado),
+                    placeholder=field["placeholder"],
+                )
+            else:
+                current_value = p_atual.get(field["key"], "")
+                p_atual[field["key"]] = st.text_area(
+                    field["label"],
+                    value=current_value,
+                    height=calcula_altura(current_value, field["min_height"]),
+                    key=_field_widget_key(field, processo_id_selecionado),
+                    placeholder=field["placeholder"],
+                )
+            render_field_error(campo_errors.get(field["key"]))
+            render_voice_dictation_control(
+                field["placeholder"],
+                field["voice_label"],
+                _field_widget_key(field, processo_id_selecionado),
+            )
 
-        if st.button("💾 Salvar Textos de Campo", type="primary"):
+        if campo_errors:
+            st.warning("Revise os campos destacados antes de salvar os textos da vistoria.")
+
+        if st.button("💾 Salvar Textos da Vistoria", type="primary", use_container_width=True):
+            erros = validar_registro_campo(p_atual)
+            if erros:
+                st.session_state[validation_errors_key] = erros
+                st.rerun()
+
+            st.session_state[validation_errors_key] = {}
             if salvar_processo(processo_id_selecionado, p_atual):
-                st.toast("✅ Textos de campo guardados na Nuvem!", icon="💾")
+                st.session_state.campo_valores_memorizados = atualizar_campos_memorizados(
+                    st.session_state.campo_valores_memorizados,
+                    p_atual,
+                )
+                st.toast("✅ Textos da vistoria guardados na Nuvem!", icon="💾")
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         st.markdown("#### 📍 Captura Rápida de GPS")
