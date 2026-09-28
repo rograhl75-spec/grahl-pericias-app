@@ -13,7 +13,13 @@ import io
 import logging
 
 from core.config import LOGO_FILE, criar_dados_padrao
-from core.database import carregar_dados, salvar_processo, excluir_processo, gerar_proximo_id
+from core.database import (
+    carregar_dados,
+    salvar_processo,
+    salvar_processo_com_importacao,
+    excluir_processo,
+    gerar_proximo_id,
+)
 from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
 from ui.import_judicial_ui import exibir_tela_importacao_pdf
@@ -427,10 +433,13 @@ elif opcao == "📥 Importar Processo (PDF)":
         p_importacao = db_processos[processo_importacao_id]
         st.info(f"✏️ Os dados importados serão aplicados ao caso ativo **{processo_importacao_id}**.")
 
-    importado_com_sucesso, dados_importados = exibir_tela_importacao_pdf(processo_importacao_id, p_importacao)
+    importado_com_sucesso, dados_importados, registro_importacao = exibir_tela_importacao_pdf(
+        processo_importacao_id,
+        p_importacao,
+    )
 
     if importado_com_sucesso:
-        if salvar_processo(processo_importacao_id, dados_importados):
+        if salvar_processo_com_importacao(processo_importacao_id, dados_importados, registro_importacao):
             st.session_state.processo_ativo = processo_importacao_id
             st.session_state.importacao_pdf_sucesso = f"✅ Processo {processo_importacao_id} importado com sucesso! Os campos foram preenchidos automaticamente."
             st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"

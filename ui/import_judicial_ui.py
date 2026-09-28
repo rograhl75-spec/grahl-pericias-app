@@ -5,15 +5,19 @@ Fluxo completo: upload → validação → processamento → revisão → preenc
 
 import streamlit as st
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 from core.pdf_processor import validar_pdfs, consolidar_multiplos_pdfs, calcular_total_paginas
 from core.ai_claude import analisar_processo_judicial, estimar_custo
-from core.cost_tracker import registrar_importacao_ia, validar_limite_diario, calcular_custo_hoje
+from core.config import obter_app_config
+from core.cost_tracker import criar_registro_importacao_ia, validar_limite_diario, calcular_custo_hoje
 
 logger = logging.getLogger(__name__)
 
 
-def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> Tuple[bool, Dict]:
+def exibir_tela_importacao_pdf(
+    processo_id_selecionado: str,
+    p_atual: Dict,
+) -> Tuple[bool, Dict, Dict]:
     """
     Tela completa de importação de PDFs com processamento Claude.
     
@@ -22,25 +26,32 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
         p_atual: Dados atuais do processo
         
     Returns:
-        Tupla: (dados_atualizados, dados_extraidos)
+        Tupla: (dados_atualizados, dados_extraidos, registro_importacao)
     """
-    
+    config = obter_app_config()
+    max_pdf_files = int(config.get("max_pdf_files", 5))
+    max_size_mb = int(config.get("max_file_size_mb", 200))
+    max_paginas = int(config.get("max_pdf_pages_total", 1200))
+
     st.markdown("### 📥 Importar Processo Judicial via PDF")
-    st.markdown("Faça upload de até 5 PDFs do processo (autos, petições, laudos, etc.)")
+    st.markdown(
+        f"Faça upload de até {max_pdf_files} PDFs do processo "
+        f"(máx. {max_size_mb}MB no total)."
+    )
     
     # ==================== ETAPA 1: UPLOAD ====================
     st.markdown("#### 📄 Passo 1: Selecionar Arquivos PDF")
     
     uploaded_files = st.file_uploader(
-        "Selecione os PDFs (máx 5 arquivos, 200MB total)",
+        f"Selecione os PDFs (máx {max_pdf_files} arquivos, {max_size_mb}MB total)",
         type=["pdf"],
         accept_multiple_files=True,
         key=f"pdf_uploader_{processo_id_selecionado}"
     )
     
     if not uploaded_files:
-        st.info("👉 Nenhum arquivo selecionado ainda. Faça upload de 1-5 PDFs para começar.")
-        return False, {}
+        st.info(f"👉 Nenhum arquivo selecionado ainda. Faça upload de 1-{max_pdf_files} PDFs para começar.")
+        return False, {}, {}
     
     # ==================== ETAPA 2: VALIDAÇÃO ====================
     st.markdown("#### ✅ Passo 2: Validar Arquivos")
@@ -50,13 +61,20 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     
     if not valido:
         st.error(mensagem)
-        return False, {}
+        return False, {}, {}
     
     # Mostrar resumo dos arquivos
     col1, col2, col3 = st.columns(3)
     
     with col1:
         num_paginas = calcular_total_paginas(uploaded_files)
+        if num_paginas < 0:
+            return False, {}, {}
+        if num_paginas > max_paginas:
+            st.error(
+                f"❌ O conjunto possui {num_paginas} páginas e excede o limite seguro de {max_paginas} páginas."
+            )
+            return False, {}, {}
         st.metric("📄 Páginas Total", num_paginas)
     
     with col2:
@@ -78,7 +96,7 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     custo_estimado_brl = custo_estimado * 5.00  # Conversão USD para BRL
     
     custo_hoje = calcular_custo_hoje()
-    limite_diario = st.secrets.get("app", {}).get("cost_limit_per_day", 250.00)
+    limite_diario = config.get("cost_limit_per_day", 250.00)
     
     col_custo1, col_custo2, col_custo3 = st.columns(3)
     
@@ -97,7 +115,7 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     permitido, custo_atual, limite = validar_limite_diario()
     if not permitido:
         st.error(f"❌ Limite diário atingido! Gasto: R$ {custo_atual:.2f}, Limite: R$ {limite:.2f}")
-        return False, {}
+        return False, {}, {}
     
     # ==================== ETAPA 4: PROCESSAMENTO ====================
     st.markdown("#### 🔄 Passo 4: Processar com Claude 3.5 Sonnet")
@@ -114,10 +132,10 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     with col_btn_cancelar:
         if st.button("❌ Cancelar", use_container_width=True):
             st.info("Importação cancelada.")
-            return False, {}
+            return False, {}, {}
     
     if not btn_processar:
-        return False, {}
+        return False, {}, {}
     
     # Processar os PDFs
     st.markdown("---")
@@ -129,17 +147,20 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     
     if not texto_consolidado:
         st.error("❌ Erro ao consolidar PDFs. Tente novamente.")
-        return False, {}
+        return False, {}, {}
     
     st.success(f"✅ {len(uploaded_files)} PDF(s) consolidados ({total_paginas} páginas)")
     
     # 2. Enviar para Claude
     st.markdown("---")
-    dados_extraidos, tokens_entrada, tokens_saida, custo_real = analisar_processo_judicial(texto_consolidado)
+    dados_extraidos, tokens_entrada, tokens_saida, custo_real, num_chamadas_claude = analisar_processo_judicial(
+        texto_consolidado,
+        processo_id=processo_id_selecionado,
+    )
     
     if not dados_extraidos:
         st.error("❌ Erro ao processar com Claude. Tente novamente.")
-        return False, {}
+        return False, {}, {}
     
     custo_real_brl = custo_real * 5.00
     
@@ -262,10 +283,10 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     
     if btn_descartar:
         st.info("Dados descartados. Você pode fazer novo upload.")
-        return False, {}
+        return False, {}, {}
     
     if not btn_confirmar:
-        return False, dados_extraidos
+        return False, dados_extraidos, {}
     
     # Preencher campos do processo
     st.markdown("---")
@@ -336,22 +357,16 @@ def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> T
     if dados_extraidos.get("quadro_epis"):
         p_atual["quadro_epis"] = dados_extraidos.get("quadro_epis", [])
     
-    # Registrar importação no Firebase
-    st.markdown("📊 Registrando importação...")
-    
     nomes_arquivos = [f.name for f in uploaded_files]
-    sucesso_registro = registrar_importacao_ia(
+    registro_importacao = criar_registro_importacao_ia(
         processo_id=processo_id_selecionado,
         nomes_arquivos=nomes_arquivos,
         tokens_entrada=tokens_entrada,
         tokens_saida=tokens_saida,
         custo_real=custo_real,
-        dados_extraidos=dados_extraidos
+        dados_extraidos=dados_extraidos,
+        num_chamadas_claude=num_chamadas_claude,
     )
-    
-    if sucesso_registro:
-        st.success(f"✅ Importação registrada! {campos_preenchidos} campos preenchidos automaticamente.")
-    else:
-        st.warning(f"⚠️ Importação concluída mas erro ao registrar. {campos_preenchidos} campos preenchidos.")
-    
-    return True, p_atual
+
+    st.success(f"✅ Importação pronta para salvar! {campos_preenchidos} campos preenchidos automaticamente.")
+    return True, p_atual, registro_importacao

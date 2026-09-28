@@ -4,7 +4,11 @@ import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from core.config import criar_dados_padrao_persistencia
+from core.config import (
+    ConfigurationError,
+    criar_dados_padrao_persistencia,
+    obter_credenciais_firebase,
+)
 
 
 @st.cache_resource
@@ -13,12 +17,12 @@ def _obter_db():
         firebase_admin.get_app()
     except ValueError:
         try:
-            cred_dict = dict(st.secrets["firebase"])
-            private_key = cred_dict.get("private_key")
-            if isinstance(private_key, str):
-                cred_dict["private_key"] = private_key.replace("\\n", "\n")
+            cred_dict = obter_credenciais_firebase()
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
+        except ConfigurationError as exc:
+            st.error(f"Configuração do Firebase incompleta: {exc}")
+            st.stop()
         except Exception:
             logging.exception("Falha ao inicializar Firebase")
             st.error("Erro ao conectar no Firebase. Verifique o st.secrets.")
@@ -49,12 +53,45 @@ def carregar_dados():
         return {}
 
 
+def _normalizar_dados_processo(dados_proc):
+    if not isinstance(dados_proc, dict):
+        raise ValueError("Os dados do processo devem ser um dicionário.")
+
+    dados_normalizados = criar_dados_padrao_persistencia()
+    dados_normalizados.update(dados_proc)
+    return dados_normalizados
+
+
 def salvar_processo(id_proc, dados_proc):
     try:
-        _obter_db().collection("processos").document(id_proc).set(dados_proc)
+        dados_normalizados = _normalizar_dados_processo(dados_proc)
+        _obter_db().collection("processos").document(id_proc).set(dados_normalizados)
         return True
     except Exception as exc:
+        logging.exception("Falha ao salvar processo %s", id_proc)
         st.error(f"Erro Crítico de Rede: {exc}")
+        return False
+
+
+def salvar_processo_com_importacao(id_proc, dados_proc, registro_importacao):
+    try:
+        if not isinstance(registro_importacao, dict):
+            raise ValueError("O registro de importação deve ser um dicionário.")
+
+        dados_normalizados = _normalizar_dados_processo(dados_proc)
+        db = _obter_db()
+        batch = db.batch()
+
+        processo_ref = db.collection("processos").document(id_proc)
+        importacao_ref = db.collection("importacoes_ia").document()
+
+        batch.set(processo_ref, dados_normalizados)
+        batch.set(importacao_ref, registro_importacao)
+        batch.commit()
+        return True
+    except Exception as exc:
+        logging.exception("Falha ao salvar processo importado %s", id_proc)
+        st.error(f"Erro ao salvar processo importado: {exc}")
         return False
 
 

@@ -7,8 +7,29 @@ import pdfplumber
 import streamlit as st
 import logging
 from typing import List, Tuple
+from contextlib import contextmanager
+from pathlib import Path
+import os
+import tempfile
+
+from core.config import obter_app_config
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _arquivo_pdf_temporario(arquivo, prefixo: str):
+    suffix = Path(arquivo.name).suffix or ".pdf"
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix=prefixo, dir="/tmp")
+    try:
+        temp.write(arquivo.getbuffer())
+        temp.close()
+        yield temp.name
+    finally:
+        try:
+            os.remove(temp.name)
+        except OSError:
+            pass
 
 
 def extrair_texto_pdf(caminho_pdf: str) -> Tuple[str, int]:
@@ -60,35 +81,37 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
     """
     texto_consolidado = ""
     total_paginas = 0
+    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 600_000))
     
     for idx, arquivo in enumerate(arquivos_pdf, 1):
         try:
-            # Salvar arquivo temporariamente
-            temp_path = f"/tmp/temp_pdf_{idx}_{arquivo.name}"
-            with open(temp_path, "wb") as f:
-                f.write(arquivo.getbuffer())
-            
-            # Extrair texto
-            texto, num_paginas = extrair_texto_pdf(temp_path)
+            with _arquivo_pdf_temporario(arquivo, f"temp_pdf_{idx}_") as temp_path:
+                texto, num_paginas = extrair_texto_pdf(temp_path)
+
             total_paginas += num_paginas
-            
-            # Adicionar ao consolidado com separador
+
             if texto:
-                texto_consolidado += f"\n\n{'='*80}\n"
-                texto_consolidado += f"ARQUIVO {idx}: {arquivo.name}\n"
-                texto_consolidado += f"{'='*80}\n\n"
-                texto_consolidado += texto
-            
-            # Limpar arquivo temporário
-            import os
-            try:
-                os.remove(temp_path)
-            except:
-                pass
+                cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {arquivo.name}\n{'='*80}\n\n"
+                tamanho_projetado = len(texto_consolidado) + len(cabecalho) + len(texto)
+                if tamanho_projetado > max_chars_total:
+                    raise ValueError(
+                        f"O texto consolidado excede o limite seguro de {max_chars_total:,} caracteres."
+                    )
+
+                texto_consolidado += cabecalho + texto
+
+            logger.info(
+                "PDF consolidado com sucesso",
+                extra={
+                    "arquivo": arquivo.name,
+                    "paginas": num_paginas,
+                    "tamanho_bytes": arquivo.size,
+                },
+            )
                 
         except Exception as e:
             st.error(f"❌ Erro ao processar {arquivo.name}: {e}")
-            logger.error(f"Erro ao processar {arquivo.name}: {e}")
+            logger.exception("Erro ao consolidar PDF %s", arquivo.name)
             continue
     
     return texto_consolidado, total_paginas
@@ -104,24 +127,39 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
     Returns:
         Tupla: (válido, mensagem_erro)
     """
+    config = obter_app_config()
+
     # Validar quantidade
-    max_arquivos = st.secrets.get("app", {}).get("max_pdf_files", 5)
+    max_arquivos = int(config.get("max_pdf_files", 5))
     if len(arquivos_pdf) > max_arquivos:
         return False, f"❌ Máximo de {max_arquivos} PDFs permitidos. Você enviou {len(arquivos_pdf)}."
     
     # Validar tamanho total
-    max_size_mb = st.secrets.get("app", {}).get("max_file_size_mb", 200)
+    max_size_mb = int(config.get("max_file_size_mb", 200))
     max_size_bytes = max_size_mb * 1024 * 1024
+    max_por_arquivo_mb = int(config.get("max_single_pdf_size_mb", 75))
+    max_por_arquivo_bytes = max_por_arquivo_mb * 1024 * 1024
     
     tamanho_total = sum(arquivo.size for arquivo in arquivos_pdf)
     if tamanho_total > max_size_bytes:
         tamanho_total_mb = tamanho_total / (1024 * 1024)
         return False, f"❌ Tamanho total de {tamanho_total_mb:.1f}MB excede limite de {max_size_mb}MB."
     
-    # Validar se são PDFs
+    # Validar se são PDFs e respeitam o limite por arquivo
     for arquivo in arquivos_pdf:
+        if arquivo.size > max_por_arquivo_bytes:
+            tamanho_mb = arquivo.size / (1024 * 1024)
+            return False, (
+                f"❌ O arquivo '{arquivo.name}' tem {tamanho_mb:.1f}MB e excede o limite "
+                f"individual de {max_por_arquivo_mb}MB."
+            )
+
         if not arquivo.name.lower().endswith(".pdf"):
             return False, f"❌ Arquivo '{arquivo.name}' não é um PDF válido."
+
+        assinatura = bytes(arquivo.getbuffer()[:5])
+        if assinatura != b"%PDF-":
+            return False, f"❌ Arquivo '{arquivo.name}' não possui assinatura válida de PDF."
     
     return True, "✅ Validação OK"
 
@@ -139,19 +177,14 @@ def calcular_total_paginas(arquivos_pdf: List) -> int:
     total = 0
     for arquivo in arquivos_pdf:
         try:
-            temp_path = f"/tmp/temp_count_{arquivo.name}"
-            with open(temp_path, "wb") as f:
-                f.write(arquivo.getbuffer())
-            
-            with pdfplumber.open(temp_path) as pdf:
-                total += len(pdf.pages)
-            
-            import os
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        except:
-            pass
+            with _arquivo_pdf_temporario(arquivo, "temp_count_") as temp_path:
+                with pdfplumber.open(temp_path) as pdf:
+                    if not pdf.pages:
+                        raise ValueError("PDF sem páginas legíveis.")
+                    total += len(pdf.pages)
+        except Exception as exc:
+            st.error(f"❌ Não foi possível inspecionar '{arquivo.name}': {exc}")
+            logger.exception("Falha ao calcular páginas do PDF %s", arquivo.name)
+            return -1
     
     return total
