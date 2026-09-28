@@ -17,16 +17,23 @@ class AiClaudeTests(unittest.TestCase):
 
         self.assertEqual(chamadas, 4)
 
-    def test_estimar_chamadas_suporta_limite_consolidado_de_1200000_chars(self):
+    def test_limite_consolidado_de_1200000_chars_cabe_em_10_chunks(self):
         texto = "A" * 1_200_000
+        config = {"claude_chunk_chars": 120_000, "claude_max_chunks": 10}
 
         with mock.patch.object(
             ai_claude,
             "obter_app_config",
-            return_value={"claude_chunk_chars": 120_000, "claude_max_chunks": 10},
+            return_value=config,
         ):
+            chunks = ai_claude._dividir_texto_em_chunks(
+                texto,
+                config["claude_chunk_chars"],
+                config["claude_max_chunks"],
+            )
             chamadas = ai_claude.estimar_chamadas_necessarias(texto)
 
+        self.assertEqual(len(chunks), 10)
         self.assertEqual(chamadas, 11)
 
     def test_parsear_json_resposta_aceita_json_embutido(self):
