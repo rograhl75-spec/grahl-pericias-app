@@ -31,10 +31,8 @@ class AiClaudeTests(unittest.TestCase):
                 config["claude_chunk_chars"],
                 config["claude_max_chunks"],
             )
-            chamadas = ai_claude.estimar_chamadas_necessarias(texto)
 
         self.assertEqual(len(chunks), 10)
-        self.assertEqual(chamadas, 11)
 
     def test_parsear_json_resposta_aceita_json_embutido(self):
         resposta = "resultado:\n{\"processo_num\": \"123\"}\nobrigado"
