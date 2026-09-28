@@ -48,7 +48,11 @@ def registrar_importacao_ia(
         )
         db.collection("importacoes_ia").add(registro)
         
-        logger.info(f"Importação registrada: {processo_id} - R$ {custo_brl:.2f}")
+        logger.info(
+            "Importação registrada: %s - R$ %.2f",
+            processo_id,
+            registro.get("custo_brl", 0.0),
+        )
         return True
         
     except Exception as e:
@@ -196,7 +200,9 @@ def calcular_custo_hoje() -> float:
 
 def validar_limite_diario() -> tuple:
     """
-    Verifica se o limite diário de API foi atingido.
+    Verifica se o limite diário de custo (R$) foi atingido.
+    Este limite é sobre GASTO em reais, complementar ao limite de
+    QUANTIDADE de chamadas verificado em validar_limite_chamadas_claude().
     
     Returns:
         Tupla: (permitido: bool, custo_atual: float, limite: float)
@@ -213,6 +219,11 @@ def registrar_chamada_claude(
     sucesso: bool,
     detalhes: Dict | None = None,
 ):
+    """
+    Registra uma chamada individual à API Claude (cada chunk ou consolidação
+    conta como uma chamada). Usado para controlar o limite diário de
+    REQUISIÇÕES (max_api_calls_per_day), independente do custo em R$.
+    """
     try:
         registro = {
             "processo_id": processo_id,
@@ -227,6 +238,7 @@ def registrar_chamada_claude(
 
 
 def contar_chamadas_claude_hoje() -> int:
+    """Conta quantas chamadas à API Claude já foram feitas hoje (UTC/local do servidor)."""
     try:
         agora = datetime.now()
         inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -240,6 +252,18 @@ def contar_chamadas_claude_hoje() -> int:
 
 
 def validar_limite_chamadas_claude(chamadas_previstas: int = 1) -> tuple:
+    """
+    Verifica se realizar `chamadas_previstas` novas chamadas à API Claude
+    ainda respeitaria o limite diário configurado em `max_api_calls_per_day`.
+
+    Importante: para processos grandes que são divididos em vários "chunks",
+    cada chunk + a chamada de consolidação final contam como chamadas
+    separadas. Por isso a estimativa de chamadas é calculada antes de
+    iniciar o processamento (ver core/ai_claude.py).
+
+    Returns:
+        Tupla: (permitido: bool, chamadas_hoje: int, limite: int)
+    """
     chamadas_hoje = contar_chamadas_claude_hoje()
     limite = int(obter_app_config().get("max_api_calls_per_day", 50))
     permitido = (chamadas_hoje + chamadas_previstas) <= limite
