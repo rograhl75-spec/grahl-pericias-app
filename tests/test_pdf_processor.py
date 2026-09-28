@@ -34,11 +34,57 @@ class PdfProcessorTests(unittest.TestCase):
         self.assertIn("Máximo de 5 PDFs", mensagem)
 
     def test_validar_limite_paginas_rejeita_total_acima_do_limite(self):
-        with mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_pages_total": 10}):
-            valido, mensagem = pdf_processor.validar_limite_paginas(11)
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_pages_total": 3000}):
+            valido, mensagem = pdf_processor.validar_limite_paginas(3001)
 
         self.assertFalse(valido)
-        self.assertIn("11 páginas", mensagem)
+        self.assertIn("3.001 páginas", mensagem)
+        self.assertIn("3.000 páginas", mensagem)
+        self.assertIn("divida o processo em lotes menores", mensagem)
+
+    def test_validar_limite_paginas_aceita_total_no_limite(self):
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_pages_total": 3000}):
+            valido, mensagem = pdf_processor.validar_limite_paginas(3000)
+
+        self.assertTrue(valido)
+        self.assertEqual(mensagem, "")
+
+    def test_consolidar_multiplos_pdfs_aceita_texto_ate_limite_configurado(self):
+        arquivo = DummyUpload("processo.pdf", b"%PDF-1.7")
+        limite = 1_200_000
+        cabecalho = f"\n\n{'='*80}\nARQUIVO 1: {arquivo.name}\n{'='*80}\n\n"
+        texto_no_limite = "A" * (limite - len(cabecalho))
+
+        with (
+            mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_chars_total": limite}),
+            mock.patch.object(pdf_processor, "extrair_texto_pdf", return_value=(texto_no_limite, 42)),
+        ):
+            texto_consolidado, total_paginas = pdf_processor.consolidar_multiplos_pdfs([arquivo])
+
+        self.assertEqual(len(texto_consolidado), limite)
+        self.assertEqual(total_paginas, 42)
+
+    def test_consolidar_multiplos_pdfs_informa_limite_de_caracteres(self):
+        arquivo = DummyUpload("processo.pdf", b"%PDF-1.7")
+        streamlit = mock.Mock()
+
+        with (
+            mock.patch.object(pdf_processor, "st", streamlit),
+            mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_chars_total": 1_200_000}),
+            mock.patch.object(
+                pdf_processor,
+                "extrair_texto_pdf",
+                return_value=("A" * 1_200_000, 15),
+            ),
+        ):
+            texto_consolidado, total_paginas = pdf_processor.consolidar_multiplos_pdfs([arquivo])
+
+        self.assertEqual(texto_consolidado, "")
+        self.assertEqual(total_paginas, 15)
+        streamlit.error.assert_called_once()
+        mensagem = streamlit.error.call_args[0][0]
+        self.assertIn("1.200.000 caracteres", mensagem)
+        self.assertIn("divida o processo em lotes menores", mensagem)
 
 
 if __name__ == "__main__":

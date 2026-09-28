@@ -17,6 +17,18 @@ class AiClaudeTests(unittest.TestCase):
 
         self.assertEqual(chamadas, 4)
 
+    def test_estimar_chamadas_suporta_limite_consolidado_de_1200000_chars(self):
+        texto = "A" * 1_200_000
+
+        with mock.patch.object(
+            ai_claude,
+            "obter_app_config",
+            return_value={"claude_chunk_chars": 120_000, "claude_max_chunks": 10},
+        ):
+            chamadas = ai_claude.estimar_chamadas_necessarias(texto)
+
+        self.assertEqual(chamadas, 11)
+
     def test_parsear_json_resposta_aceita_json_embutido(self):
         resposta = "resultado:\n{\"processo_num\": \"123\"}\nobrigado"
 
