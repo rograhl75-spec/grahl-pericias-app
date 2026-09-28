@@ -12,6 +12,7 @@ import base64
 import io
 import logging
 import html
+import json
 
 from core.config import LOGO_FILE, criar_dados_padrao
 from core.database import (
@@ -27,6 +28,125 @@ from ui import aplicar_estilos
 from ui.import_judicial_ui import exibir_tela_importacao_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def render_voice_dictation_control(widget_placeholder: str, field_label: str, control_key: str) -> None:
+    """Renderiza botão de ditado por voz para um campo Streamlit identificado por placeholder."""
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "_", control_key)
+    btn_id = f"voice_btn_{safe_key}"
+    status_id = f"voice_status_{safe_key}"
+
+    components.html(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; margin:0.15rem 0 0.8rem 0;">
+            <button id="{btn_id}" type="button" aria-label="Ditado por voz para {html.escape(field_label)}"
+                style="border:1px solid #cbd5e1; border-radius:8px; padding:6px 10px; cursor:pointer; background:#ffffff; font-size:14px;">
+                🎤 Ditar
+            </button>
+            <span id="{status_id}" style="font-size:12px; color:#334155;">Toque para ditar.</span>
+        </div>
+        <script>
+            (function() {{
+                const btn = document.getElementById({json.dumps(btn_id)});
+                const status = document.getElementById({json.dumps(status_id)});
+                const targetPlaceholder = {json.dumps(widget_placeholder)};
+                const SpeechRecognition = window.parent.SpeechRecognition || window.parent.webkitSpeechRecognition;
+
+                function setStatus(msg, color) {{
+                    status.textContent = msg;
+                    status.style.color = color || "#334155";
+                }}
+
+                function applyTranscript(transcript) {{
+                    const target = window.parent.document.querySelector(
+                        `textarea[placeholder="${{targetPlaceholder}}"], input[placeholder="${{targetPlaceholder}}"]`
+                    );
+                    if (!target) {{
+                        setStatus("Não foi possível localizar o campo.", "#b91c1c");
+                        return;
+                    }}
+
+                    const currentValue = target.value || "";
+                    const hasText = currentValue.trim().length > 0;
+                    const normalized = transcript.trim();
+                    if (!normalized) {{
+                        setStatus("Nenhum áudio reconhecido.", "#b45309");
+                        return;
+                    }}
+                    const prefix = hasText && !/[\\s\\n]$/.test(currentValue) ? " " : "";
+                    const insertText = prefix + normalized;
+                    const start = Number.isInteger(target.selectionStart) ? target.selectionStart : currentValue.length;
+                    const end = Number.isInteger(target.selectionEnd) ? target.selectionEnd : currentValue.length;
+                    const nextValue = currentValue.slice(0, start) + insertText + currentValue.slice(end);
+
+                    const valueProto = target.tagName === "TEXTAREA"
+                        ? window.parent.HTMLTextAreaElement.prototype
+                        : window.parent.HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(valueProto, "value")?.set;
+                    if (setter) {{
+                        setter.call(target, nextValue);
+                    }} else {{
+                        target.value = nextValue;
+                    }}
+
+                    const nextCursor = start + insertText.length;
+                    target.selectionStart = nextCursor;
+                    target.selectionEnd = nextCursor;
+                    target.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                    target.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                    setStatus("Texto transcrito adicionado ao campo.", "#166534");
+                }}
+
+                if (!SpeechRecognition) {{
+                    btn.disabled = true;
+                    btn.style.opacity = "0.6";
+                    btn.style.cursor = "not-allowed";
+                    setStatus("Ditado por voz não suportado neste navegador.", "#475569");
+                    return;
+                }}
+
+                btn.addEventListener("click", function() {{
+                    const recognition = new SpeechRecognition();
+                    recognition.lang = "pt-BR";
+                    recognition.interimResults = false;
+                    recognition.maxAlternatives = 1;
+                    recognition.continuous = false;
+
+                    btn.disabled = true;
+                    setStatus("🎙️ Ouvindo... fale agora.", "#0f766e");
+
+                    recognition.onresult = function(event) {{
+                        const transcript = event.results?.[0]?.[0]?.transcript || "";
+                        applyTranscript(transcript);
+                    }};
+
+                    recognition.onerror = function(event) {{
+                        const messageMap = {{
+                            "not-allowed": "Permissão de microfone negada.",
+                            "service-not-allowed": "Serviço de voz indisponível neste dispositivo.",
+                            "audio-capture": "Microfone não encontrado.",
+                            "network": "Falha de rede ao transcrever.",
+                            "no-speech": "Nenhuma fala detectada."
+                        }};
+                        setStatus(messageMap[event.error] || `Erro de voz: ${{event.error}}.`, "#b91c1c");
+                    }};
+
+                    recognition.onend = function() {{
+                        btn.disabled = false;
+                    }};
+
+                    try {{
+                        recognition.start();
+                    }} catch (err) {{
+                        btn.disabled = false;
+                        setStatus("Não foi possível iniciar o ditado agora.", "#b91c1c");
+                    }}
+                }});
+            }})();
+        </script>
+        """,
+        height=54,
+    )
 
 
 # === MOTOR DE EXTRAÇÃO DUPLO (TAGS + NATURAL) ===
@@ -749,22 +869,95 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         )
 
         st.markdown("### 🚜 Vistoria Pericial de Campo")
+        st.caption("Use teclado, voz ou ambos no mesmo campo. O ditado usa reconhecimento de voz do navegador (quando disponível).")
         
         # TEXTOS LIVRES DE FORMULÁRIO (Prevenção de Perda de Dados)
-        col_c1, col_c2 = st.columns(2)
-        with col_c1: p_atual["campo_data"] = st.text_input("Data da Vistoria", value=p_atual.get("campo_data", ""), key=f"cd_{processo_id_selecionado}")
-        with col_c2: p_atual["campo_horario"] = st.text_input("Horário da Vistoria", value=p_atual.get("campo_horario", ""), key=f"ch_{processo_id_selecionado}")
+        ph_data = "Digite ou dite a data da vistoria"
+        ph_horario = "Digite ou dite o horário da vistoria"
+        ph_local = "Digite ou dite o endereço da diligência"
+        ph_presentes = "Digite ou dite as pessoas presentes na vistoria"
+        ph_autor = "Digite ou dite as informações do segurado/autor"
+        ph_reu = "Digite ou dite as informações do empregador/acompanhante"
+        ph_medicoes = "Digite ou dite as medições realizadas em campo"
 
-        p_atual["local_diligencia"] = st.text_input("Endereço da Diligência", value=p_atual.get("local_diligencia", ""), key=f"ld_{processo_id_selecionado}")
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            p_atual["campo_data"] = st.text_input(
+                "Data da Vistoria",
+                value=p_atual.get("campo_data", ""),
+                key=f"cd_{processo_id_selecionado}",
+                placeholder=ph_data,
+            )
+            render_voice_dictation_control(ph_data, "Data da Vistoria", f"cd_{processo_id_selecionado}")
+        with col_c2:
+            p_atual["campo_horario"] = st.text_input(
+                "Horário da Vistoria",
+                value=p_atual.get("campo_horario", ""),
+                key=f"ch_{processo_id_selecionado}",
+                placeholder=ph_horario,
+            )
+            render_voice_dictation_control(ph_horario, "Horário da Vistoria", f"ch_{processo_id_selecionado}")
+
+        p_atual["local_diligencia"] = st.text_input(
+            "Endereço da Diligência",
+            value=p_atual.get("local_diligencia", ""),
+            key=f"ld_{processo_id_selecionado}",
+            placeholder=ph_local,
+        )
+        render_voice_dictation_control(ph_local, "Endereço da Diligência", f"ld_{processo_id_selecionado}")
         
         v_pres = p_atual.get("presentes_pericia", "")
-        p_atual["presentes_pericia"] = st.text_area("Pessoas Presentes na Vistoria (Nome e Função)", value=v_pres, height=calcula_altura(v_pres, 80), key=f"pp_{processo_id_selecionado}")
+        p_atual["presentes_pericia"] = st.text_area(
+            "Pessoas Presentes na Vistoria (Nome e Função)",
+            value=v_pres,
+            height=calcula_altura(v_pres, 80),
+            key=f"pp_{processo_id_selecionado}",
+            placeholder=ph_presentes,
+        )
+        render_voice_dictation_control(
+            ph_presentes,
+            "Pessoas Presentes na Vistoria (Nome e Função)",
+            f"pp_{processo_id_selecionado}",
+        )
         v_ca = p_atual.get("campo_declaracoes_autor", "")
-        p_atual["campo_declaracoes_autor"] = st.text_area("Informações prestadas pelo Segurado / Autor", value=v_ca, height=calcula_altura(v_ca, 120), key=f"cda_{processo_id_selecionado}")
+        p_atual["campo_declaracoes_autor"] = st.text_area(
+            "Informações prestadas pelo Segurado / Autor",
+            value=v_ca,
+            height=calcula_altura(v_ca, 120),
+            key=f"cda_{processo_id_selecionado}",
+            placeholder=ph_autor,
+        )
+        render_voice_dictation_control(
+            ph_autor,
+            "Informações prestadas pelo Segurado / Autor",
+            f"cda_{processo_id_selecionado}",
+        )
         v_cr = p_atual.get("campo_declaracoes_reu", "")
-        p_atual["campo_declaracoes_reu"] = st.text_area("Informações prestadas pelo Empregador / Acompanhante", value=v_cr, height=calcula_altura(v_cr, 120), key=f"cdr_{processo_id_selecionado}")
+        p_atual["campo_declaracoes_reu"] = st.text_area(
+            "Informações prestadas pelo Empregador / Acompanhante",
+            value=v_cr,
+            height=calcula_altura(v_cr, 120),
+            key=f"cdr_{processo_id_selecionado}",
+            placeholder=ph_reu,
+        )
+        render_voice_dictation_control(
+            ph_reu,
+            "Informações prestadas pelo Empregador / Acompanhante",
+            f"cdr_{processo_id_selecionado}",
+        )
         v_cm = p_atual.get("campo_medicoes", "")
-        p_atual["campo_medicoes"] = st.text_area("Medições Realizadas em Campo (Ex: Sonometria NHO-01)", value=v_cm, height=calcula_altura(v_cm, 120), key=f"cm_{processo_id_selecionado}")
+        p_atual["campo_medicoes"] = st.text_area(
+            "Medições Realizadas em Campo (Ex: Sonometria NHO-01)",
+            value=v_cm,
+            height=calcula_altura(v_cm, 120),
+            key=f"cm_{processo_id_selecionado}",
+            placeholder=ph_medicoes,
+        )
+        render_voice_dictation_control(
+            ph_medicoes,
+            "Medições Realizadas em Campo (Ex: Sonometria NHO-01)",
+            f"cm_{processo_id_selecionado}",
+        )
 
         if st.button("💾 Salvar Textos de Campo", type="primary"):
             if salvar_processo(processo_id_selecionado, p_atual):
