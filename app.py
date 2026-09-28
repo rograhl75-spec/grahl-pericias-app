@@ -16,6 +16,7 @@ from core.config import LOGO_FILE, criar_dados_padrao
 from core.database import carregar_dados, salvar_processo, excluir_processo, gerar_proximo_id
 from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
+from ui.import_judicial_ui import exibir_tela_importacao_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,7 @@ if "parsed_data" not in st.session_state: st.session_state.parsed_data = {}
 if "gps_field_main" not in st.session_state: st.session_state.gps_field_main = ""
 if "confirmar_exclusao_dupla" not in st.session_state: st.session_state.confirmar_exclusao_dupla = False
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
+if "importacao_pdf_sucesso" not in st.session_state: st.session_state.importacao_pdf_sucesso = ""
 
 aplicar_estilos()
 
@@ -275,7 +277,7 @@ st.markdown("<hr style='margin:0.5rem 0 1.5rem 0; border: none; height: 1px; bac
 def trocar_menu(acao): st.session_state.menu_opcao = acao
 
 st.sidebar.markdown("<h2 style='color: #FFFFFF; font-size: 1.3rem; margin-bottom: 1rem;'>📁 Painel de Controle</h2>", unsafe_allow_html=True)
-acoes_menu = ["➕ Novo Processo / Caso", "✏️ Dados, Escritório & SST", "🚜 Diligência de Campo & Fotos", "🗑️ Excluir Processo", "📄 Gerar Documento Word Final"]
+acoes_menu = ["➕ Novo Processo / Caso", "📥 Importar Processo (PDF)", "✏️ Dados, Escritório & SST", "🚜 Diligência de Campo & Fotos", "🗑️ Excluir Processo", "📄 Gerar Documento Word Final"]
 for acao in acoes_menu: st.sidebar.button(acao, on_click=trocar_menu, args=(acao,), use_container_width=True)
 
 opcao = st.session_state.menu_opcao
@@ -413,11 +415,37 @@ if opcao == "➕ Novo Processo / Caso":
             st.toast(f"✅ Caso {proximo_id} criado com sucesso!", icon="💾")
             st.rerun()
 
+elif opcao == "📥 Importar Processo (PDF)":
+    processo_importacao_id = processo_id_selecionado
+    processo_novo = processo_importacao_id == "Nenhum caso cadastrado"
+
+    if processo_novo:
+        processo_importacao_id = gerar_proximo_id(db_processos)
+        p_importacao = criar_dados_padrao()
+        st.info(f"🆕 Nenhum caso ativo encontrado. A importação criará automaticamente o caso **{processo_importacao_id}**.")
+    else:
+        p_importacao = db_processos[processo_importacao_id]
+        st.info(f"✏️ Os dados importados serão aplicados ao caso ativo **{processo_importacao_id}**.")
+
+    importado_com_sucesso, dados_importados = exibir_tela_importacao_pdf(processo_importacao_id, p_importacao)
+
+    if importado_com_sucesso:
+        if salvar_processo(processo_importacao_id, dados_importados):
+            st.session_state.processo_ativo = processo_importacao_id
+            st.session_state.importacao_pdf_sucesso = f"✅ Processo {processo_importacao_id} importado com sucesso! Os campos foram preenchidos automaticamente."
+            st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
+            st.rerun()
+        else:
+            st.error("❌ Não foi possível salvar os dados importados no banco.")
+
 elif opcao == "✏️ Dados, Escritório & SST":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
         st.warning("Cadastre ou selecione um caso no menu lateral para começar.")
     else:
         p_atual = db_processos[processo_id_selecionado]
+        if st.session_state.importacao_pdf_sucesso:
+            st.success(st.session_state.importacao_pdf_sucesso)
+            st.session_state.importacao_pdf_sucesso = ""
         is_prev = "Previdenciário" in p_atual.get("modulo_atuacao", "")
         
         st.markdown(f"<div style='background-color: #E2E8F0; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px;'><b style='color: #1B365D;'>Caso Ativo:</b> {processo_id_selecionado} &nbsp;|&nbsp; <b style='color: #1B365D;'>Papel:</b> {p_atual.get('papel_profissional', 'Não Definido')}</div>", unsafe_allow_html=True)
