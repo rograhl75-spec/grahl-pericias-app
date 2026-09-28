@@ -609,6 +609,8 @@ if "confirmar_exclusao_target" not in st.session_state: st.session_state.confirm
 if "confirmar_exclusao_input" not in st.session_state: st.session_state.confirmar_exclusao_input = ""
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
 if "importacao_pdf_sucesso" not in st.session_state: st.session_state.importacao_pdf_sucesso = ""
+if "importacao_pdf_orientacao" not in st.session_state: st.session_state.importacao_pdf_orientacao = ""
+if "importacao_pdf_destino_forcado" not in st.session_state: st.session_state.importacao_pdf_destino_forcado = ""
 if "campo_valores_memorizados" not in st.session_state: st.session_state.campo_valores_memorizados = {}
 
 aplicar_estilos()
@@ -627,7 +629,10 @@ with col_titulo:
 
 st.markdown("<hr style='margin:0.5rem 0 1.5rem 0; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)
 
-def trocar_menu(acao): st.session_state.menu_opcao = acao
+def trocar_menu(acao):
+    st.session_state.menu_opcao = acao
+    if acao != "📥 Importar Processo (PDF)":
+        st.session_state.importacao_pdf_destino_forcado = ""
 
 
 def salvar_processo_com_feedback(id_proc, dados_proc, sucesso_msg, erro_msg="❌ Não foi possível salvar os dados. Tente novamente."):
@@ -713,7 +718,8 @@ if opcao == "➕ Novo Processo / Caso":
     is_prev_mod = "Previdenciário" in modulo_escolhido
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("#### 📥 Importar Documento Base (.docx)")
+    st.markdown("#### 📥 Importar Documento Base (.docx) — opcional")
+    st.caption("Se desejar, você pode criar o caso agora e seguir direto para a importação dos PDFs deste novo processo.")
     arquivo_importado = st.file_uploader("Selecione o arquivo Word (com ou sem tags da IA).", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
     
     if arquivo_importado is not None:
@@ -753,7 +759,13 @@ if opcao == "➕ Novo Processo / Caso":
         p_empresa = st.text_input(lbl_emp, value=parsed.get("reclamada_nome", ""), key=f"novo_emp_{st.session_state.uploader_key}")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.form_submit_button("Criar Caso Completo"):
+        col_submit_1, col_submit_2 = st.columns(2)
+        with col_submit_1:
+            btn_criar_caso = st.form_submit_button("Criar Caso Completo", use_container_width=True)
+        with col_submit_2:
+            btn_criar_importar = st.form_submit_button("Criar Caso e Importar PDFs", type="primary", use_container_width=True)
+
+        if btn_criar_caso or btn_criar_importar:
             id_novo_processo = gerar_proximo_id(db_processos)
             p_novo = criar_dados_padrao()
             if parsed:
@@ -774,23 +786,59 @@ if opcao == "➕ Novo Processo / Caso":
                 st.session_state.parsed_data = {}
                 st.session_state.uploader_key += 1
                 st.session_state.processo_ativo = id_novo_processo
-                st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
-                st.toast(f"✅ Caso {id_novo_processo} criado com sucesso!", icon="💾")
+                if btn_criar_importar:
+                    st.session_state.importacao_pdf_destino_forcado = id_novo_processo
+                    st.session_state.menu_opcao = "📥 Importar Processo (PDF)"
+                    st.toast(
+                        f"✅ Caso {id_novo_processo} criado! Continue agora com a importação dos PDFs deste processo.",
+                        icon="📥",
+                    )
+                else:
+                    st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
+                    st.toast(f"✅ Caso {id_novo_processo} criado com sucesso!", icon="💾")
                 st.rerun()
             else:
                 st.error("❌ Não foi possível criar o novo caso na nuvem.")
 
 elif opcao == "📥 Importar Processo (PDF)":
-    processo_importacao_id = processo_id_selecionado
-    processo_novo = processo_importacao_id == "Nenhum caso cadastrado"
+    destino_forcado = st.session_state.importacao_pdf_destino_forcado
+    processo_ativo_valido = processo_id_selecionado != "Nenhum caso cadastrado" and processo_id_selecionado in db_processos
+    processo_novo_previsto = estimar_proximo_id_local(db_processos)
 
-    if processo_novo:
-        processo_importacao_id = gerar_proximo_id(db_processos)
-        p_importacao = criar_dados_padrao()
-        st.info(f"🆕 Nenhum caso ativo encontrado. A importação criará automaticamente o caso **{processo_importacao_id}**.")
-    else:
+    if destino_forcado and destino_forcado in db_processos:
+        processo_importacao_id = destino_forcado
         p_importacao = db_processos[processo_importacao_id]
-        st.info(f"✏️ Os dados importados serão aplicados ao caso ativo **{processo_importacao_id}**.")
+        criar_novo_na_confirmacao = False
+        st.info(
+            f"📥 Esta importação será vinculada ao novo caso **{processo_importacao_id}**. "
+            "Os demais casos já salvos permanecerão intactos."
+        )
+    else:
+        opcoes_importacao = ["🆕 Criar novo caso para esta importação"]
+        if processo_ativo_valido:
+            opcoes_importacao.append(f"✏️ Usar o caso ativo {processo_id_selecionado}")
+
+        escolha_importacao = st.radio(
+            "Como deseja importar este processo?",
+            options=opcoes_importacao,
+            help="Por segurança, a importação cria um novo caso por padrão. Use o caso ativo apenas quando quiser complementar exatamente esse mesmo processo.",
+        )
+        criar_novo_na_confirmacao = escolha_importacao == opcoes_importacao[0]
+
+        if criar_novo_na_confirmacao:
+            processo_importacao_id = processo_novo_previsto
+            p_importacao = criar_dados_padrao()
+            st.info(
+                f"🆕 A importação criará um novo caso com o próximo ID disponível (**{processo_novo_previsto}**) "
+                "e não alterará os casos já preenchidos."
+            )
+        else:
+            processo_importacao_id = processo_id_selecionado
+            p_importacao = db_processos[processo_importacao_id]
+            st.warning(
+                f"✏️ Os dados importados serão aplicados ao caso ativo **{processo_importacao_id}**. "
+                "Use esta opção somente se os PDFs pertencem a este mesmo processo."
+            )
 
     importado_com_sucesso, dados_importados, registro_importacao = exibir_tela_importacao_pdf(
         processo_importacao_id,
@@ -798,9 +846,20 @@ elif opcao == "📥 Importar Processo (PDF)":
     )
 
     if importado_com_sucesso:
+        if criar_novo_na_confirmacao:
+            processo_importacao_id = gerar_proximo_id(db_processos)
+            registro_importacao["processo_id"] = processo_importacao_id
         if salvar_processo_com_importacao(processo_importacao_id, dados_importados, registro_importacao):
             st.session_state.processo_ativo = processo_importacao_id
-            st.session_state.importacao_pdf_sucesso = f"✅ Processo {processo_importacao_id} importado com sucesso! Os campos foram preenchidos automaticamente."
+            st.session_state.importacao_pdf_destino_forcado = ""
+            st.session_state.importacao_pdf_sucesso = (
+                f"✅ Processo {processo_importacao_id} importado com sucesso! "
+                "Os dados extraídos foram vinculados somente a este caso."
+            )
+            st.session_state.importacao_pdf_orientacao = (
+                "Próximo passo: revise e complete os dados do processo/partes, "
+                "os dados do escritório/representação e os campos de SST/documentos nas abas abaixo."
+            )
             st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
             st.rerun()
         else:
@@ -814,6 +873,9 @@ elif opcao == "✏️ Dados, Escritório & SST":
         if st.session_state.importacao_pdf_sucesso:
             st.success(st.session_state.importacao_pdf_sucesso)
             st.session_state.importacao_pdf_sucesso = ""
+        if st.session_state.importacao_pdf_orientacao:
+            st.info(st.session_state.importacao_pdf_orientacao)
+            st.session_state.importacao_pdf_orientacao = ""
         is_prev = "Previdenciário" in p_atual.get("modulo_atuacao", "")
         
         st.info(

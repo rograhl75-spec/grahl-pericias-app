@@ -51,6 +51,18 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(proc_id, "Proc_03")
 
+    def test_gerar_proximo_id_atomico_respeita_maior_id_local_quando_contador_ausente(self):
+        fake_ref = _FakeRef(_FakeSnapshot(exists=False, value=0))
+        fake_db = _FakeDb(fake_ref)
+
+        with (
+            mock.patch.object(database, "_obter_db", return_value=fake_db),
+            mock.patch.object(database.firestore, "transactional", side_effect=lambda fn: fn),
+        ):
+            proc_id = database.gerar_proximo_id({"Proc_01": {}, "Proc_02": {}})
+
+        self.assertEqual(proc_id, "Proc_03")
+
     def test_gerar_proximo_id_atomico_no_firestore(self):
         fake_ref = _FakeRef(_FakeSnapshot(exists=True, value=5))
         fake_db = _FakeDb(fake_ref)
@@ -62,6 +74,18 @@ class DatabaseTests(unittest.TestCase):
             proc_id = database.gerar_proximo_id({})
 
         self.assertEqual(proc_id, "Proc_06")
+
+    def test_gerar_proximo_id_atomico_corrige_contador_defasado(self):
+        fake_ref = _FakeRef(_FakeSnapshot(exists=True, value=1))
+        fake_db = _FakeDb(fake_ref)
+
+        with (
+            mock.patch.object(database, "_obter_db", return_value=fake_db),
+            mock.patch.object(database.firestore, "transactional", side_effect=lambda fn: fn),
+        ):
+            proc_id = database.gerar_proximo_id({"Proc_01": {}, "Proc_02": {}, "Proc_03": {}})
+
+        self.assertEqual(proc_id, "Proc_04")
 
 
 if __name__ == "__main__":
