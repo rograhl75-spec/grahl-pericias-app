@@ -61,6 +61,24 @@ class CostTrackerTests(unittest.TestCase):
         self.assertEqual(registro["custo_usd"], 2.5)
         self.assertEqual(registro["custo_brl"], 15.0)
 
+    def test_calcular_custo_hoje_usa_fieldfilter_no_firestore(self):
+        query = mock.Mock()
+        query.where.return_value = query
+        query.stream.return_value = []
+        db = mock.Mock()
+        db.collection.return_value = query
+        filtro = object()
+
+        with (
+            mock.patch.object(cost_tracker, "_obter_db", return_value=db),
+            mock.patch.object(cost_tracker, "FieldFilter", return_value=filtro) as field_filter,
+        ):
+            total = cost_tracker.calcular_custo_hoje()
+
+        self.assertEqual(total, 0.0)
+        query.where.assert_called_once_with(filter=filtro)
+        field_filter.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
