@@ -113,7 +113,11 @@ def _parsear_json_resposta(conteudo_resposta: str) -> Dict:
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', conteudo_resposta, re.DOTALL)
         if match:
-            return json.loads(match.group())
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        logger.error("Resposta da Claude sem JSON válido: %s", conteudo_resposta[:500])
         raise ValueError("Resposta da IA não retornou JSON válido.")
 
 
@@ -217,6 +221,14 @@ def _prompt_consolidacao_jsons(prompt_base: str, jsons_parciais: List[Dict]) -> 
     )
 
 
+def estimar_chamadas_necessarias(texto_consolidado: str) -> int:
+    config = obter_app_config()
+    limite_chars = int(config.get("claude_chunk_chars", 120_000))
+    max_chunks = int(config.get("claude_max_chunks", 6))
+    chunks = _dividir_texto_em_chunks(texto_consolidado, limite_chars, max_chunks)
+    return len(chunks) if len(chunks) == 1 else len(chunks) + 1
+
+
 def analisar_processo_judicial(
     texto_consolidado: str,
     processo_id: str = "processo_sem_id",
@@ -238,7 +250,7 @@ def analisar_processo_judicial(
         limite_chars = int(config.get("claude_chunk_chars", 120_000))
         max_chunks = int(config.get("claude_max_chunks", 6))
         chunks = _dividir_texto_em_chunks(texto_consolidado, limite_chars, max_chunks)
-        chamadas_previstas = len(chunks) if len(chunks) == 1 else len(chunks) + 1
+        chamadas_previstas = estimar_chamadas_necessarias(texto_consolidado)
 
         permitido, chamadas_hoje, limite_chamadas = validar_limite_chamadas_claude(chamadas_previstas)
         if not permitido:

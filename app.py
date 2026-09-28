@@ -254,7 +254,7 @@ def parse_pre_relatorio(doc):
     return dados
 
 icon_config = LOGO_FILE if os.path.exists(LOGO_FILE) else "🛡️"
-st.set_page_config(page_title="Grahl Consultoria - Perícias", page_icon=icon_config, layout="wide")
+st.set_page_config(page_title="GRAHL Perícias", page_icon=icon_config, layout="wide")
 
 if "processo_ativo" not in st.session_state: st.session_state.processo_ativo = None
 if "menu_opcao" not in st.session_state: st.session_state.menu_opcao = "➕ Novo Processo / Caso"
@@ -275,7 +275,7 @@ with col_logo:
     else: st.markdown("### 🛡️ **GRAHL**")
 
 with col_titulo:
-    st.markdown("<h1 style='margin:0; font-size: 1.7rem;'>Gestão Pericial Trabalhista & Extrajudicial</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='margin:0; font-size: 1.7rem;'>GRAHL Perícias</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color: #64748B; margin:0; font-size: 1rem; font-weight: 500;'>Assistência Técnica, Perícias Judiciais e Laudos Previdenciários.</p>", unsafe_allow_html=True)
 
 st.markdown("<hr style='margin:0.5rem 0 1.5rem 0; border: none; height: 1px; background-color: #CBD5E1;'>", unsafe_allow_html=True)

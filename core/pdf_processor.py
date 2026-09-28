@@ -164,6 +164,21 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
     return True, "✅ Validação OK"
 
 
+def validar_limite_paginas(total_paginas: int) -> Tuple[bool, str]:
+    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 1200))
+
+    if total_paginas < 0:
+        return False, "❌ Não foi possível calcular o total de páginas dos PDFs enviados."
+
+    if total_paginas > max_paginas:
+        return False, (
+            f"❌ O conjunto possui {total_paginas} páginas e excede o limite seguro "
+            f"de {max_paginas} páginas."
+        )
+
+    return True, ""
+
+
 def calcular_total_paginas(arquivos_pdf: List) -> int:
     """
     Calcula o número total de páginas sem extrair texto (apenas validação).

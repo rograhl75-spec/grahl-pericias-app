@@ -1,9 +1,10 @@
 import copy
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
-LOGO_FILE = "logo dourado grahl consultoria.png"
+LOGO_FILE = str(Path(__file__).resolve().parent.parent / "logo dourado grahl consultoria.png")
 
 
 class ConfigurationError(Exception):
