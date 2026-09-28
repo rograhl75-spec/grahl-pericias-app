@@ -81,7 +81,7 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
     """
     texto_consolidado = ""
     total_paginas = 0
-    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 600_000))
+    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 1_200_000))
     
     for idx, arquivo in enumerate(arquivos_pdf, 1):
         try:
@@ -95,7 +95,9 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
                 tamanho_projetado = len(texto_consolidado) + len(cabecalho) + len(texto)
                 if tamanho_projetado > max_chars_total:
                     raise ValueError(
-                        f"O texto consolidado excede o limite seguro de {max_chars_total:,} caracteres."
+                        f"O texto consolidado projetado ({tamanho_projetado:,} caracteres) excede "
+                        f"o limite configurado ({max_chars_total:,} caracteres). "
+                        "Divida os PDFs em lotes menores e tente novamente."
                     )
 
                 texto_consolidado += cabecalho + texto
@@ -165,7 +167,7 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
 
 
 def validar_limite_paginas(total_paginas: int) -> Tuple[bool, str]:
-    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 1200))
+    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 3000))
 
     if total_paginas < 0:
         return False, "❌ Não foi possível calcular o total de páginas dos PDFs enviados."
