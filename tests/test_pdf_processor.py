@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+from contextlib import nullcontext
 
 from core import pdf_processor
 
@@ -85,6 +86,53 @@ class PdfProcessorTests(unittest.TestCase):
         mensagem = streamlit.error.call_args[0][0]
         self.assertIn("1.200.000 caracteres", mensagem)
         self.assertIn("divida o processo em lotes menores", mensagem)
+
+    def test_calcular_total_paginas_continua_quando_um_pdf_falha(self):
+        arquivos = [
+            DummyUpload("corrompido.pdf", b"%PDF-1.7"),
+            DummyUpload("valido.pdf", b"%PDF-1.7"),
+        ]
+        streamlit = mock.Mock()
+        pdf_valido = mock.Mock()
+        pdf_valido.pages = [object(), object(), object()]
+
+        with (
+            mock.patch.object(pdf_processor, "st", streamlit),
+            mock.patch.object(
+                pdf_processor.pdfplumber,
+                "open",
+                side_effect=[ValueError("PDF corrompido"), nullcontext(pdf_valido)],
+            ),
+        ):
+            total_paginas = pdf_processor.calcular_total_paginas(arquivos)
+
+        self.assertEqual(total_paginas, 3)
+        streamlit.error.assert_called_once()
+        self.assertIn("corrompido.pdf", streamlit.error.call_args[0][0])
+
+    def test_consolidar_multiplos_pdfs_ignora_pdf_sem_leitura_e_mantem_outro_valido(self):
+        arquivos = [
+            DummyUpload("corrompido.pdf", b"%PDF-1.7"),
+            DummyUpload("valido.pdf", b"%PDF-1.7"),
+        ]
+        streamlit = mock.Mock()
+
+        with (
+            mock.patch.object(pdf_processor, "st", streamlit),
+            mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_chars_total": 1_200_000}),
+            mock.patch.object(
+                pdf_processor,
+                "extrair_texto_pdf",
+                side_effect=[("", 0), ("Texto útil", 12)],
+            ),
+        ):
+            texto_consolidado, total_paginas = pdf_processor.consolidar_multiplos_pdfs(arquivos)
+
+        self.assertIn("ARQUIVO 2: valido.pdf", texto_consolidado)
+        self.assertIn("Texto útil", texto_consolidado)
+        self.assertEqual(total_paginas, 12)
+        streamlit.error.assert_called_once()
+        self.assertIn("corrompido.pdf", streamlit.error.call_args[0][0])
 
 
 if __name__ == "__main__":

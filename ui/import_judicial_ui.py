@@ -5,6 +5,7 @@ Fluxo completo: upload → validação → processamento → revisão → preenc
 
 import streamlit as st
 import logging
+import traceback
 from typing import Dict, Tuple
 from core.pdf_processor import (
     validar_pdfs,
@@ -76,6 +77,35 @@ CAMPOS_IMPORTACAO_MAPEADOS = {
 }
 
 
+def _resumir_arquivos(arquivos_pdf) -> str:
+    nomes = [getattr(arquivo, "name", "arquivo_sem_nome") for arquivo in arquivos_pdf or []]
+    return ", ".join(nomes) if nomes else "nenhum arquivo"
+
+
+def _exibir_erro_processamento(
+    etapa: str,
+    processo_id: str,
+    arquivos_pdf,
+    erro: Exception,
+) -> None:
+    arquivos = _resumir_arquivos(arquivos_pdf)
+    traceback_formatado = "".join(traceback.format_exception(type(erro), erro, erro.__traceback__))
+    logger.error(
+        "Falha na importação judicial | etapa=%s | processo=%s | arquivos=%s\n%s",
+        etapa,
+        processo_id,
+        arquivos,
+        traceback_formatado,
+    )
+    st.error(
+        f"❌ Falha na etapa '{etapa}'. Revise os PDFs enviados, tente novamente e, se o erro persistir, "
+        "consulte os detalhes técnicos abaixo."
+    )
+    st.caption(f"Processo: {processo_id} • Arquivos: {arquivos}")
+    with st.expander("Detalhes técnicos da falha"):
+        st.code(traceback_formatado)
+
+
 def aplicar_dados_importados_ao_processo(p_atual: Dict, dados_extraidos: Dict) -> Tuple[Dict, int]:
     processo_atualizado = dict(p_atual)
     campos_preenchidos = 0
@@ -144,7 +174,16 @@ def exibir_tela_importacao_pdf(
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        num_paginas = calcular_total_paginas(uploaded_files)
+        try:
+            num_paginas = calcular_total_paginas(uploaded_files)
+        except Exception as exc:
+            _exibir_erro_processamento(
+                "inspecionar páginas dos PDFs",
+                processo_id_selecionado,
+                uploaded_files,
+                exc,
+            )
+            return False, p_atual, {}
         paginas_validas, mensagem_paginas = validar_limite_paginas(num_paginas)
         if not paginas_validas:
             if mensagem_paginas:
@@ -229,11 +268,11 @@ def exibir_tela_importacao_pdf(
         btn_processar = st.button(
             "🚀 Processar com Claude 3.5 Sonnet",
             type="primary",
-            use_container_width=True
+            width="stretch",
         )
     
     with col_btn_cancelar:
-        if st.button("❌ Cancelar", use_container_width=True):
+        if st.button("❌ Cancelar", width="stretch"):
             st.info("Importação cancelada.")
             return False, p_atual, {}
     
@@ -245,17 +284,42 @@ def exibir_tela_importacao_pdf(
     st.markdown("#### ⏳ Processando...")
     
     # 1. Consolidar PDFs
-    with st.spinner("📚 Consolidando PDFs..."):
-        texto_consolidado, total_paginas = consolidar_multiplos_pdfs(uploaded_files)
+    try:
+        with st.spinner("📚 Consolidando PDFs..."):
+            texto_consolidado, total_paginas = consolidar_multiplos_pdfs(uploaded_files)
+    except Exception as exc:
+        _exibir_erro_processamento(
+            "consolidar os PDFs",
+            processo_id_selecionado,
+            uploaded_files,
+            exc,
+        )
+        return False, p_atual, {}
     
     if not texto_consolidado:
-        st.error("❌ Erro ao consolidar PDFs. Tente novamente.")
+        st.error(
+            "❌ Não foi possível extrair texto legível dos PDFs enviados. "
+            "Verifique se os arquivos não estão corrompidos, protegidos ou apenas digitalizados sem OCR."
+        )
+        st.caption(
+            f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}. "
+            "Você pode reenviar somente os PDFs válidos ou gerar uma versão com texto pesquisável."
+        )
         return False, p_atual, {}
 
     try:
         chamadas_previstas = estimar_chamadas_necessarias(texto_consolidado)
     except ValueError as exc:
         st.error(f"❌ {exc}")
+        st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
+        return False, p_atual, {}
+    except Exception as exc:
+        _exibir_erro_processamento(
+            "estimar as chamadas da Claude",
+            processo_id_selecionado,
+            uploaded_files,
+            exc,
+        )
         return False, p_atual, {}
 
     permitido_chamadas, chamadas_ja_usadas, limite_chamadas = validar_limite_chamadas_claude(
@@ -274,17 +338,30 @@ def exibir_tela_importacao_pdf(
         )
         return False, p_atual, {}
 
-    st.success(f"✅ {len(uploaded_files)} PDF(s) consolidados ({total_paginas} páginas)")
+    st.success(f"✅ Texto consolidado com {total_paginas} página(s) legível(is)")
     
     # 2. Enviar para Claude
     st.markdown("---")
-    dados_extraidos, tokens_entrada, tokens_saida, custo_real, num_chamadas_claude = analisar_processo_judicial(
-        texto_consolidado,
-        processo_id=processo_id_selecionado,
-    )
+    try:
+        dados_extraidos, tokens_entrada, tokens_saida, custo_real, num_chamadas_claude = analisar_processo_judicial(
+            texto_consolidado,
+            processo_id=processo_id_selecionado,
+        )
+    except Exception as exc:
+        _exibir_erro_processamento(
+            "processar os PDFs com a Claude",
+            processo_id_selecionado,
+            uploaded_files,
+            exc,
+        )
+        return False, p_atual, {}
     
     if not dados_extraidos:
-        st.error("❌ Erro ao processar com Claude. Tente novamente.")
+        st.error(
+            "❌ A análise da Claude não retornou dados válidos para preencher o processo. "
+            "Revise as mensagens exibidas acima e tente novamente com os PDFs em lotes menores, se necessário."
+        )
+        st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
         return False, p_atual, {}
     
     custo_real_brl = custo_real * taxa_cambio
@@ -397,13 +474,13 @@ def exibir_tela_importacao_pdf(
         btn_confirmar = st.button(
             "✅ Confirmar e Preencher Campos",
             type="primary",
-            use_container_width=True
+            width="stretch",
         )
     
     with col_conf2:
         btn_descartar = st.button(
             "❌ Descartar",
-            use_container_width=True
+            width="stretch",
         )
     
     if btn_descartar:
@@ -417,18 +494,27 @@ def exibir_tela_importacao_pdf(
     st.markdown("---")
     st.markdown("#### 📝 Preenchendo Campos Automaticamente...")
     
-    p_atual, campos_preenchidos = aplicar_dados_importados_ao_processo(p_atual, dados_extraidos)
-    
-    nomes_arquivos = [f.name for f in uploaded_files]
-    registro_importacao = criar_registro_importacao_ia(
-        processo_id=processo_id_selecionado,
-        nomes_arquivos=nomes_arquivos,
-        tokens_entrada=tokens_entrada,
-        tokens_saida=tokens_saida,
-        custo_real=custo_real,
-        dados_extraidos=dados_extraidos,
-        num_chamadas_claude=num_chamadas_claude,
-    )
+    try:
+        p_atual, campos_preenchidos = aplicar_dados_importados_ao_processo(p_atual, dados_extraidos)
+
+        nomes_arquivos = [f.name for f in uploaded_files]
+        registro_importacao = criar_registro_importacao_ia(
+            processo_id=processo_id_selecionado,
+            nomes_arquivos=nomes_arquivos,
+            tokens_entrada=tokens_entrada,
+            tokens_saida=tokens_saida,
+            custo_real=custo_real,
+            dados_extraidos=dados_extraidos,
+            num_chamadas_claude=num_chamadas_claude,
+        )
+    except Exception as exc:
+        _exibir_erro_processamento(
+            "preparar os dados para salvar no Firestore",
+            processo_id_selecionado,
+            uploaded_files,
+            exc,
+        )
+        return False, p_atual, {}
 
     st.success(f"✅ Importação pronta para salvar! {campos_preenchidos} campos preenchidos automaticamente.")
     return True, p_atual, registro_importacao

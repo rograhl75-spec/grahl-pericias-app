@@ -8,6 +8,11 @@ import logging
 from datetime import datetime
 from typing import Dict, List
 
+try:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+except Exception:  # pragma: no cover - fallback para versões antigas
+    FieldFilter = None
+
 from core.config import obter_app_config, obter_taxa_cambio_usd_brl
 from core.database import _obter_db
 
@@ -26,6 +31,12 @@ def _normalizar_float_nao_negativo(valor, padrao: float = 0.0) -> float:
         return max(float(valor), 0.0)
     except (TypeError, ValueError):
         return padrao
+
+
+def _aplicar_filtro(query, field_path: str, op_string: str, value):
+    if FieldFilter is None:
+        return query.where(field_path, op_string, value)
+    return query.where(filter=FieldFilter(field_path, op_string, value))
 
 
 def registrar_importacao_ia(
@@ -157,8 +168,11 @@ def calcular_custo_mensal() -> Dict:
         agora = datetime.now()
         inicio_mes = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        docs = db.collection("importacoes_ia").where(
-            "data_importacao", ">=", inicio_mes.isoformat()
+        docs = _aplicar_filtro(
+            db.collection("importacoes_ia"),
+            "data_importacao",
+            ">=",
+            inicio_mes.isoformat(),
         ).stream()
         
         total_custo_brl = 0.0
@@ -207,8 +221,11 @@ def calcular_custo_hoje() -> float:
         agora = datetime.now()
         inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
         
-        docs = db.collection("importacoes_ia").where(
-            "data_importacao", ">=", inicio_dia.isoformat()
+        docs = _aplicar_filtro(
+            db.collection("importacoes_ia"),
+            "data_importacao",
+            ">=",
+            inicio_dia.isoformat(),
         ).stream()
         
         total_custo = 0.0
@@ -271,8 +288,11 @@ def contar_chamadas_claude_hoje() -> int:
     try:
         agora = datetime.now()
         inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-        docs = _obter_db().collection("claude_api_calls").where(
-            "data_chamada", ">=", inicio_dia.isoformat()
+        docs = _aplicar_filtro(
+            _obter_db().collection("claude_api_calls"),
+            "data_chamada",
+            ">=",
+            inicio_dia.isoformat(),
         ).stream()
         return sum(1 for _ in docs)
     except Exception as exc:

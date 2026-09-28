@@ -645,7 +645,7 @@ def salvar_processo_com_feedback(id_proc, dados_proc, sucesso_msg, erro_msg="❌
 
 st.sidebar.markdown("<h2 style='color: #FFFFFF; font-size: 1.3rem; margin-bottom: 1rem;'>📁 Painel de Controle</h2>", unsafe_allow_html=True)
 acoes_menu = ["➕ Novo Processo / Caso", "📥 Importar Processo (PDF)", "✏️ Dados, Escritório & SST", "🚜 Diligência de Campo & Fotos", "🗑️ Excluir Processo", "📄 Gerar Documento Word Final"]
-for acao in acoes_menu: st.sidebar.button(acao, on_click=trocar_menu, args=(acao,), use_container_width=True)
+for acao in acoes_menu: st.sidebar.button(acao, on_click=trocar_menu, args=(acao,), width="stretch")
 
 opcao = st.session_state.menu_opcao
 
@@ -761,9 +761,9 @@ if opcao == "➕ Novo Processo / Caso":
         st.markdown("<br>", unsafe_allow_html=True)
         col_submit_1, col_submit_2 = st.columns(2)
         with col_submit_1:
-            btn_criar_caso = st.form_submit_button("Criar Caso Completo", use_container_width=True)
+            btn_criar_caso = st.form_submit_button("Criar Caso Completo", width="stretch")
         with col_submit_2:
-            btn_criar_importar = st.form_submit_button("Criar Caso e Importar PDFs", type="primary", use_container_width=True)
+            btn_criar_importar = st.form_submit_button("Criar Caso e Importar PDFs", type="primary", width="stretch")
 
         if btn_criar_caso or btn_criar_importar:
             id_novo_processo = gerar_proximo_id(db_processos)
@@ -953,7 +953,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         "data_entrega": st.column_config.TextColumn("Periodicidade / Entrega", width="medium"),
                         "obs": st.column_config.TextColumn("Eficácia / Tema 555", width="large"),
                     },
-                    num_rows="dynamic", use_container_width=True, height=300
+                    num_rows="dynamic", width="stretch", height=300
                 )
 
                 if st.button("💾 Salvar Tabela de EPIs", key=f"btn_pe_{processo_id_selecionado}"):
@@ -1104,7 +1104,7 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         "data_entrega": st.column_config.TextColumn("Data Entrega", width="medium"),
                         "obs": st.column_config.TextColumn("Observações", width="large"),
                     },
-                    num_rows="dynamic", use_container_width=True, height=350
+                    num_rows="dynamic", width="stretch", height=350
                 )
 
                 if st.button("💾 Salvar Tabela EPIs", key=f"btn_st_{processo_id_selecionado}"):
@@ -1179,14 +1179,14 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<div class='campo-shortcuts-title'>Atalhos rápidos</div>", unsafe_allow_html=True)
         shortcut_cols = st.columns(4, gap="small")
         with shortcut_cols[0]:
-            if st.button("📅 Usar hoje", key=f"campo_hoje_{processo_id_selecionado}", use_container_width=True):
+            if st.button("📅 Usar hoje", key=f"campo_hoje_{processo_id_selecionado}", width="stretch"):
                 _set_field_widget_value(
                     FIELD_RECORD_FIELDS[0],
                     processo_id_selecionado,
                     datetime.now().strftime("%d/%m/%Y"),
                 )
         with shortcut_cols[1]:
-            if st.button("🕒 Usar agora", key=f"campo_agora_{processo_id_selecionado}", use_container_width=True):
+            if st.button("🕒 Usar agora", key=f"campo_agora_{processo_id_selecionado}", width="stretch"):
                 _set_field_widget_value(
                     FIELD_RECORD_FIELDS[1],
                     processo_id_selecionado,
@@ -1196,7 +1196,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             if st.button(
                 "↺ Último local",
                 key=f"campo_local_{processo_id_selecionado}",
-                use_container_width=True,
+                width="stretch",
                 disabled=not remembered_fields.get("local_diligencia"),
             ):
                 _set_field_widget_value(
@@ -1208,7 +1208,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             if st.button(
                 "↺ Últimos presentes",
                 key=f"campo_presentes_{processo_id_selecionado}",
-                use_container_width=True,
+                width="stretch",
                 disabled=not remembered_fields.get("presentes_pericia"),
             ):
                 _set_field_widget_value(
@@ -1273,7 +1273,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         if campo_errors:
             st.warning("Revise os campos destacados antes de salvar os textos da vistoria.")
 
-        if st.button("💾 Salvar Textos da Vistoria", type="primary", use_container_width=True):
+        if st.button("💾 Salvar Textos da Vistoria", type="primary", width="stretch"):
             erros = validar_registro_campo(p_atual)
             if erros:
                 st.session_state[validation_errors_key] = erros

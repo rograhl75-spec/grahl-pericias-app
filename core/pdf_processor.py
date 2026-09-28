@@ -92,19 +92,34 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
             with _arquivo_pdf_temporario(arquivo, f"temp_pdf_{idx}_") as temp_path:
                 texto, num_paginas = extrair_texto_pdf(temp_path)
 
+            if num_paginas <= 0:
+                logger.warning("PDF ignorado por falha de leitura: %s", arquivo.name)
+                st.error(
+                    f"❌ O arquivo '{arquivo.name}' não pôde ser lido ou não possui páginas válidas. "
+                    "Remova-o ou envie uma versão íntegra do PDF."
+                )
+                continue
+
+            if not texto.strip():
+                logger.warning("PDF ignorado por não conter texto extraível: %s", arquivo.name)
+                st.warning(
+                    f"⚠️ O arquivo '{arquivo.name}' não possui texto legível para análise automática. "
+                    "Se ele for digitalizado, gere um PDF com OCR antes de reenviar."
+                )
+                continue
+
             total_paginas += num_paginas
 
-            if texto:
-                cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {arquivo.name}\n{'='*80}\n\n"
-                tamanho_projetado = len(texto_consolidado) + len(cabecalho) + len(texto)
-                if tamanho_projetado > max_chars_total:
-                    raise ValueError(
-                        "O texto consolidado dos PDFs ultrapassa o limite de "
-                        f"{_formatar_inteiro(max_chars_total)} caracteres para uma única importação. "
-                        "Remova alguns arquivos, selecione menos páginas ou divida o processo em lotes menores."
-                    )
+            cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {arquivo.name}\n{'='*80}\n\n"
+            tamanho_projetado = len(texto_consolidado) + len(cabecalho) + len(texto)
+            if tamanho_projetado > max_chars_total:
+                raise ValueError(
+                    "O texto consolidado dos PDFs ultrapassa o limite de "
+                    f"{_formatar_inteiro(max_chars_total)} caracteres para uma única importação. "
+                    "Remova alguns arquivos, selecione menos páginas ou divida o processo em lotes menores."
+                )
 
-                texto_consolidado += cabecalho + texto
+            texto_consolidado += cabecalho + texto
 
             logger.info(
                 "PDF consolidado com sucesso",
@@ -197,6 +212,7 @@ def calcular_total_paginas(arquivos_pdf: List) -> int:
         Total de páginas
     """
     total = 0
+    encontrou_pdf_valido = False
     for arquivo in arquivos_pdf:
         try:
             with _arquivo_pdf_temporario(arquivo, "temp_count_") as temp_path:
@@ -204,9 +220,13 @@ def calcular_total_paginas(arquivos_pdf: List) -> int:
                     if not pdf.pages:
                         raise ValueError("PDF sem páginas legíveis.")
                     total += len(pdf.pages)
+                    encontrou_pdf_valido = True
         except Exception as exc:
             st.error(f"❌ Não foi possível inspecionar '{arquivo.name}': {exc}")
             logger.exception("Falha ao calcular páginas do PDF %s", arquivo.name)
-            return -1
+            continue
+
+    if not encontrou_pdf_valido:
+        return -1
     
     return total
