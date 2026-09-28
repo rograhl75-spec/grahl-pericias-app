@@ -14,6 +14,20 @@ from core.database import _obter_db
 logger = logging.getLogger(__name__)
 
 
+def _normalizar_inteiro_nao_negativo(valor, padrao: int = 0) -> int:
+    try:
+        return max(int(valor), 0)
+    except (TypeError, ValueError):
+        return padrao
+
+
+def _normalizar_float_nao_negativo(valor, padrao: float = 0.0) -> float:
+    try:
+        return max(float(valor), 0.0)
+    except (TypeError, ValueError):
+        return padrao
+
+
 def registrar_importacao_ia(
     processo_id: str,
     nomes_arquivos: List[str],
@@ -70,12 +84,23 @@ def criar_registro_importacao_ia(
     dados_extraidos: Dict,
     num_chamadas_claude: int = 1,
 ) -> Dict:
+    arquivos = []
+    for nome in nomes_arquivos:
+        if nome is None:
+            continue
+        nome_limpo = str(nome).strip()
+        if nome_limpo:
+            arquivos.append(nome_limpo)
+    tokens_entrada = _normalizar_inteiro_nao_negativo(tokens_entrada)
+    tokens_saida = _normalizar_inteiro_nao_negativo(tokens_saida)
+    custo_real = _normalizar_float_nao_negativo(custo_real)
+    num_chamadas_claude = _normalizar_inteiro_nao_negativo(num_chamadas_claude, 1)
     custo_brl = custo_real * 5.00
     return {
         "processo_id": processo_id,
         "data_importacao": datetime.now().isoformat(),
-        "arquivos": nomes_arquivos,
-        "num_arquivos": len(nomes_arquivos),
+        "arquivos": arquivos,
+        "num_arquivos": len(arquivos),
         "tokens_entrada": tokens_entrada,
         "tokens_saida": tokens_saida,
         "tokens_total": tokens_entrada + tokens_saida,
@@ -208,7 +233,10 @@ def validar_limite_diario() -> tuple:
         Tupla: (permitido: bool, custo_atual: float, limite: float)
     """
     custo_hoje = calcular_custo_hoje()
-    limite = obter_app_config().get("cost_limit_per_day", 250.00)
+    limite = _normalizar_float_nao_negativo(
+        obter_app_config().get("cost_limit_per_day", 250.00),
+        250.00,
+    )
     
     return custo_hoje < limite, custo_hoje, limite
 
@@ -265,7 +293,11 @@ def validar_limite_chamadas_claude(chamadas_previstas: int = 1) -> tuple:
         Tupla: (permitido: bool, chamadas_hoje: int, limite: int)
     """
     chamadas_hoje = contar_chamadas_claude_hoje()
-    limite = int(obter_app_config().get("max_api_calls_per_day", 50))
+    limite = _normalizar_inteiro_nao_negativo(
+        obter_app_config().get("max_api_calls_per_day", 50),
+        50,
+    )
+    chamadas_previstas = _normalizar_inteiro_nao_negativo(chamadas_previstas, 1)
     permitido = (chamadas_hoje + chamadas_previstas) <= limite
     return permitido, chamadas_hoje, limite
 

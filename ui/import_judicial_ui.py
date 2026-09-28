@@ -6,12 +6,90 @@ Fluxo completo: upload → validação → processamento → revisão → preenc
 import streamlit as st
 import logging
 from typing import Dict, Tuple
-from core.pdf_processor import validar_pdfs, consolidar_multiplos_pdfs, calcular_total_paginas
-from core.ai_claude import analisar_processo_judicial, estimar_custo
+from core.pdf_processor import (
+    validar_pdfs,
+    consolidar_multiplos_pdfs,
+    calcular_total_paginas,
+    validar_limite_paginas,
+)
+from core.ai_claude import analisar_processo_judicial, estimar_custo, estimar_chamadas_necessarias
 from core.config import obter_app_config
-from core.cost_tracker import criar_registro_importacao_ia, validar_limite_diario, calcular_custo_hoje
+from core.cost_tracker import (
+    criar_registro_importacao_ia,
+    validar_limite_diario,
+    calcular_custo_hoje,
+    contar_chamadas_claude_hoje,
+    validar_limite_chamadas_claude,
+)
 
 logger = logging.getLogger(__name__)
+
+CAMPOS_IMPORTACAO_MAPEADOS = {
+    "processo_num": "processo_num",
+    "orgao_julgador": "orgao_julgador",
+    "data_autuacao": "data_autuacao",
+    "valor_causa": "valor_causa",
+    "rito_processual": "rito_processual",
+    "reclamante_nome": "reclamante_nome",
+    "reclamante_cpf": "reclamante_cpf",
+    "reclamante_adv": "reclamante_adv",
+    "reclamada_nome": "reclamada_nome",
+    "reclamada_cnpj": "reclamada_cnpj",
+    "reclamada_adv": "reclamada_adv",
+    "data_admissao": "data_admissao",
+    "status_contrato": "status_contrato",
+    "periodo_imprescrito": "periodo_imprescrito",
+    "cargos": "cargos",
+    "setor": "setor",
+    "ultima_remuneracao": "ultima_remuneracao",
+    "objeto_pericia": "objeto_pericia",
+    "atividades_inicial": "atividades_inicial",
+    "agentes_alegados": "agentes_alegados",
+    "pedidos_tecnicos": "pedidos_tecnicos",
+    "preliminares_periciais": "preliminares_periciais",
+    "defesa_merito_sst": "defesa_merito_sst",
+    "fase_processual": "fase_processual",
+    "campo_data": "campo_data",
+    "campo_horario": "campo_horario",
+    "local_diligencia": "local_diligencia",
+    "doc_ltcat": "doc_ltcat",
+    "doc_laudo": "doc_laudo",
+    "doc_ppp": "doc_ppp",
+    "doc_pgr": "doc_pgr",
+    "doc_os": "doc_os",
+    "doc_asos": "doc_asos",
+    "doc_outros": "doc_outros",
+    "quesitos_juizo": "quesitos_juizo",
+    "quesitos_autor": "quesitos_autor",
+    "quesitos_reu": "quesitos_reu",
+    "segurado_nascimento": "segurado_nascimento",
+    "profissao_cargo": "profissao_cargo",
+    "relato_inicial": "relato_inicial",
+    "apr_fisicos": "apr_fisicos",
+    "apr_quimicos": "apr_quimicos",
+    "apr_biologicos": "apr_biologicos",
+    "enquadramento_legal_prev": "enquadramento_legal_prev",
+    "presentes_pericia": "presentes_pericia",
+    "campo_declaracoes_autor": "campo_declaracoes_autor",
+    "campo_declaracoes_reu": "campo_declaracoes_reu",
+    "campo_medicoes": "campo_medicoes",
+}
+
+
+def aplicar_dados_importados_ao_processo(p_atual: Dict, dados_extraidos: Dict) -> Tuple[Dict, int]:
+    processo_atualizado = dict(p_atual)
+    campos_preenchidos = 0
+
+    for campo_app, campo_ia in CAMPOS_IMPORTACAO_MAPEADOS.items():
+        valor = dados_extraidos.get(campo_ia)
+        if valor and valor != "[Não localizado nos documentos]":
+            processo_atualizado[campo_app] = valor
+            campos_preenchidos += 1
+
+    if dados_extraidos.get("quadro_epis"):
+        processo_atualizado["quadro_epis"] = dados_extraidos.get("quadro_epis", [])
+
+    return processo_atualizado, campos_preenchidos
 
 
 def exibir_tela_importacao_pdf(
@@ -26,12 +104,11 @@ def exibir_tela_importacao_pdf(
         p_atual: Dados atuais do processo
         
     Returns:
-        Tupla: (dados_atualizados, dados_extraidos, registro_importacao)
+        Tupla: (importado_com_sucesso, dados_do_processo, registro_importacao)
     """
     config = obter_app_config()
     max_pdf_files = int(config.get("max_pdf_files", 5))
     max_size_mb = int(config.get("max_file_size_mb", 200))
-    max_paginas = int(config.get("max_pdf_pages_total", 1200))
 
     st.markdown("### 📥 Importar Processo Judicial via PDF")
     st.markdown(
@@ -51,7 +128,7 @@ def exibir_tela_importacao_pdf(
     
     if not uploaded_files:
         st.info(f"👉 Nenhum arquivo selecionado ainda. Faça upload de 1-{max_pdf_files} PDFs para começar.")
-        return False, {}, {}
+        return False, p_atual, {}
     
     # ==================== ETAPA 2: VALIDAÇÃO ====================
     st.markdown("#### ✅ Passo 2: Validar Arquivos")
@@ -61,20 +138,18 @@ def exibir_tela_importacao_pdf(
     
     if not valido:
         st.error(mensagem)
-        return False, {}, {}
+        return False, p_atual, {}
     
     # Mostrar resumo dos arquivos
     col1, col2, col3 = st.columns(3)
     
     with col1:
         num_paginas = calcular_total_paginas(uploaded_files)
-        if num_paginas < 0:
-            return False, {}, {}
-        if num_paginas > max_paginas:
-            st.error(
-                f"❌ O conjunto possui {num_paginas} páginas e excede o limite seguro de {max_paginas} páginas."
-            )
-            return False, {}, {}
+        paginas_validas, mensagem_paginas = validar_limite_paginas(num_paginas)
+        if not paginas_validas:
+            if mensagem_paginas:
+                st.error(mensagem_paginas)
+            return False, p_atual, {}
         st.metric("📄 Páginas Total", num_paginas)
     
     with col2:
@@ -96,7 +171,15 @@ def exibir_tela_importacao_pdf(
     custo_estimado_brl = custo_estimado * 5.00  # Conversão USD para BRL
     
     custo_hoje = calcular_custo_hoje()
-    limite_diario = config.get("cost_limit_per_day", 250.00)
+    try:
+        limite_diario = max(float(config.get("cost_limit_per_day", 250.00)), 0.0)
+    except (TypeError, ValueError):
+        limite_diario = 250.00
+    try:
+        limite_chamadas = max(int(config.get("max_api_calls_per_day", 50)), 0)
+    except (TypeError, ValueError):
+        limite_chamadas = 50
+    chamadas_hoje = contar_chamadas_claude_hoje()
     
     col_custo1, col_custo2, col_custo3 = st.columns(3)
     
@@ -107,15 +190,25 @@ def exibir_tela_importacao_pdf(
         st.metric("📊 Gasto Hoje", f"R$ {custo_hoje:.2f}")
     
     with col_custo3:
-        percentual = (custo_hoje / limite_diario) * 100
+        percentual = ((custo_hoje / limite_diario) * 100) if limite_diario > 0 else 0
         cor = "🟢" if percentual < 75 else "🟡" if percentual < 90 else "🔴"
-        st.metric(f"{cor} Limite Diário", f"R$ {limite_diario:.2f}")
+        st.metric(f"{cor} Limite de Custo", f"R$ {limite_diario:.2f}")
+
+    st.caption("O limite diário de custo (R$) é validado separadamente do limite diário de chamadas da API Claude.")
+
+    col_chamadas1, col_chamadas2, col_chamadas3 = st.columns(3)
+    with col_chamadas1:
+        st.metric("🔁 Chamadas Hoje", chamadas_hoje)
+    with col_chamadas2:
+        st.metric("📉 Limite de Chamadas", limite_chamadas)
+    with col_chamadas3:
+        st.metric("✅ Chamadas Restantes", max(limite_chamadas - chamadas_hoje, 0))
     
     # Validar limite diário
     permitido, custo_atual, limite = validar_limite_diario()
     if not permitido:
         st.error(f"❌ Limite diário atingido! Gasto: R$ {custo_atual:.2f}, Limite: R$ {limite:.2f}")
-        return False, {}, {}
+        return False, p_atual, {}
     
     # ==================== ETAPA 4: PROCESSAMENTO ====================
     st.markdown("#### 🔄 Passo 4: Processar com Claude 3.5 Sonnet")
@@ -132,10 +225,10 @@ def exibir_tela_importacao_pdf(
     with col_btn_cancelar:
         if st.button("❌ Cancelar", use_container_width=True):
             st.info("Importação cancelada.")
-            return False, {}, {}
+            return False, p_atual, {}
     
     if not btn_processar:
-        return False, {}, {}
+        return False, p_atual, {}
     
     # Processar os PDFs
     st.markdown("---")
@@ -147,8 +240,30 @@ def exibir_tela_importacao_pdf(
     
     if not texto_consolidado:
         st.error("❌ Erro ao consolidar PDFs. Tente novamente.")
-        return False, {}, {}
-    
+        return False, p_atual, {}
+
+    try:
+        chamadas_previstas = estimar_chamadas_necessarias(texto_consolidado)
+    except ValueError as exc:
+        st.error(f"❌ {exc}")
+        return False, p_atual, {}
+
+    permitido_chamadas, chamadas_ja_usadas, limite_chamadas = validar_limite_chamadas_claude(
+        chamadas_previstas
+    )
+    st.info(
+        "Esta importação deve usar "
+        f"{chamadas_previstas} chamada(s) da Claude "
+        "(cada chunk processado e a consolidação final contam separadamente)."
+    )
+    if not permitido_chamadas:
+        st.error(
+            "❌ Limite diário de chamadas Claude atingido para esta importação. "
+            f"Hoje: {chamadas_ja_usadas}, limite: {limite_chamadas}, "
+            f"necessárias: {chamadas_previstas}."
+        )
+        return False, p_atual, {}
+
     st.success(f"✅ {len(uploaded_files)} PDF(s) consolidados ({total_paginas} páginas)")
     
     # 2. Enviar para Claude
@@ -160,7 +275,7 @@ def exibir_tela_importacao_pdf(
     
     if not dados_extraidos:
         st.error("❌ Erro ao processar com Claude. Tente novamente.")
-        return False, {}, {}
+        return False, p_atual, {}
     
     custo_real_brl = custo_real * 5.00
     
@@ -283,79 +398,16 @@ def exibir_tela_importacao_pdf(
     
     if btn_descartar:
         st.info("Dados descartados. Você pode fazer novo upload.")
-        return False, {}, {}
+        return False, p_atual, {}
     
     if not btn_confirmar:
-        return False, dados_extraidos, {}
+        return False, p_atual, {}
     
     # Preencher campos do processo
     st.markdown("---")
     st.markdown("#### 📝 Preenchendo Campos Automaticamente...")
     
-    # Mapear dados extraídos para campos do app
-    campos_mapeados = {
-        "processo_num": "processo_num",
-        "orgao_julgador": "orgao_julgador",
-        "data_autuacao": "data_autuacao",
-        "valor_causa": "valor_causa",
-        "rito_processual": "rito_processual",
-        "reclamante_nome": "reclamante_nome",
-        "reclamante_cpf": "reclamante_cpf",
-        "reclamante_adv": "reclamante_adv",
-        "reclamada_nome": "reclamada_nome",
-        "reclamada_cnpj": "reclamada_cnpj",
-        "reclamada_adv": "reclamada_adv",
-        "data_admissao": "data_admissao",
-        "status_contrato": "status_contrato",
-        "periodo_imprescrito": "periodo_imprescrito",
-        "cargos": "cargos",
-        "setor": "setor",
-        "ultima_remuneracao": "ultima_remuneracao",
-        "objeto_pericia": "objeto_pericia",
-        "atividades_inicial": "atividades_inicial",
-        "agentes_alegados": "agentes_alegados",
-        "pedidos_tecnicos": "pedidos_tecnicos",
-        "preliminares_periciais": "preliminares_periciais",
-        "defesa_merito_sst": "defesa_merito_sst",
-        "fase_processual": "fase_processual",
-        "campo_data": "campo_data",
-        "campo_horario": "campo_horario",
-        "local_diligencia": "local_diligencia",
-        "doc_ltcat": "doc_ltcat",
-        "doc_laudo": "doc_laudo",
-        "doc_ppp": "doc_ppp",
-        "doc_pgr": "doc_pgr",
-        "doc_os": "doc_os",
-        "doc_asos": "doc_asos",
-        "doc_outros": "doc_outros",
-        "quesitos_juizo": "quesitos_juizo",
-        "quesitos_autor": "quesitos_autor",
-        "quesitos_reu": "quesitos_reu",
-        "segurado_nascimento": "segurado_nascimento",
-        "profissao_cargo": "profissao_cargo",
-        "relato_inicial": "relato_inicial",
-        "apr_fisicos": "apr_fisicos",
-        "apr_quimicos": "apr_quimicos",
-        "apr_biologicos": "apr_biologicos",
-        "enquadramento_legal_prev": "enquadramento_legal_prev",
-        "presentes_pericia": "presentes_pericia",
-        "campo_declaracoes_autor": "campo_declaracoes_autor",
-        "campo_declaracoes_reu": "campo_declaracoes_reu",
-        "campo_medicoes": "campo_medicoes",
-    }
-    
-    campos_preenchidos = 0
-    for campo_app, campo_ia in campos_mapeados.items():
-        valor = dados_extraidos.get(campo_ia)
-        
-        # Preencher apenas se não for vazio e não for a mensagem padrão
-        if valor and valor != "[Não localizado nos documentos]":
-            p_atual[campo_app] = valor
-            campos_preenchidos += 1
-    
-    # Tratar EPIs se houver
-    if dados_extraidos.get("quadro_epis"):
-        p_atual["quadro_epis"] = dados_extraidos.get("quadro_epis", [])
+    p_atual, campos_preenchidos = aplicar_dados_importados_ao_processo(p_atual, dados_extraidos)
     
     nomes_arquivos = [f.name for f in uploaded_files]
     registro_importacao = criar_registro_importacao_ia(
