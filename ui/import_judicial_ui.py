@@ -1,0 +1,357 @@
+"""
+Interface Streamlit para importação de processos judiciais via PDF com Claude 3.5 Sonnet.
+Fluxo completo: upload → validação → processamento → revisão → preenchimento automático
+"""
+
+import streamlit as st
+import logging
+from typing import Dict, List, Tuple
+from core.pdf_processor import validar_pdfs, consolidar_multiplos_pdfs, calcular_total_paginas
+from core.ai_claude import analisar_processo_judicial, estimar_custo
+from core.cost_tracker import registrar_importacao_ia, validar_limite_diario, calcular_custo_hoje
+
+logger = logging.getLogger(__name__)
+
+
+def exibir_tela_importacao_pdf(processo_id_selecionado: str, p_atual: Dict) -> Tuple[bool, Dict]:
+    """
+    Tela completa de importação de PDFs com processamento Claude.
+    
+    Args:
+        processo_id_selecionado: ID do processo ativo
+        p_atual: Dados atuais do processo
+        
+    Returns:
+        Tupla: (dados_atualizados, dados_extraidos)
+    """
+    
+    st.markdown("### 📥 Importar Processo Judicial via PDF")
+    st.markdown("Faça upload de até 5 PDFs do processo (autos, petições, laudos, etc.)")
+    
+    # ==================== ETAPA 1: UPLOAD ====================
+    st.markdown("#### 📄 Passo 1: Selecionar Arquivos PDF")
+    
+    uploaded_files = st.file_uploader(
+        "Selecione os PDFs (máx 5 arquivos, 200MB total)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key=f"pdf_uploader_{processo_id_selecionado}"
+    )
+    
+    if not uploaded_files:
+        st.info("👉 Nenhum arquivo selecionado ainda. Faça upload de 1-5 PDFs para começar.")
+        return False, {}
+    
+    # ==================== ETAPA 2: VALIDAÇÃO ====================
+    st.markdown("#### ✅ Passo 2: Validar Arquivos")
+    
+    # Validar PDFs
+    valido, mensagem = validar_pdfs(uploaded_files)
+    
+    if not valido:
+        st.error(mensagem)
+        return False, {}
+    
+    # Mostrar resumo dos arquivos
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        num_paginas = calcular_total_paginas(uploaded_files)
+        st.metric("📄 Páginas Total", num_paginas)
+    
+    with col2:
+        tamanho_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+        st.metric("📦 Tamanho Total", f"{tamanho_mb:.1f} MB")
+    
+    with col3:
+        st.metric("📋 Arquivos", len(uploaded_files))
+    
+    # Lista de arquivos
+    st.markdown("**Arquivos selecionados:**")
+    for f in uploaded_files:
+        st.write(f"✅ {f.name} ({f.size / 1024:.0f} KB)")
+    
+    # ==================== ETAPA 3: ESTIMATIVA DE CUSTO ====================
+    st.markdown("#### 💰 Passo 3: Estimativa de Custo")
+    
+    custo_estimado = estimar_custo(num_paginas)
+    custo_estimado_brl = custo_estimado * 5.00  # Conversão USD para BRL
+    
+    custo_hoje = calcular_custo_hoje()
+    limite_diario = st.secrets.get("app", {}).get("cost_limit_per_day", 250.00)
+    
+    col_custo1, col_custo2, col_custo3 = st.columns(3)
+    
+    with col_custo1:
+        st.metric("💵 Custo Estimado", f"R$ {custo_estimado_brl:.2f}")
+    
+    with col_custo2:
+        st.metric("📊 Gasto Hoje", f"R$ {custo_hoje:.2f}")
+    
+    with col_custo3:
+        percentual = (custo_hoje / limite_diario) * 100
+        cor = "🟢" if percentual < 75 else "🟡" if percentual < 90 else "🔴"
+        st.metric(f"{cor} Limite Diário", f"R$ {limite_diario:.2f}")
+    
+    # Validar limite diário
+    permitido, custo_atual, limite = validar_limite_diario()
+    if not permitido:
+        st.error(f"❌ Limite diário atingido! Gasto: R$ {custo_atual:.2f}, Limite: R$ {limite:.2f}")
+        return False, {}
+    
+    # ==================== ETAPA 4: PROCESSAMENTO ====================
+    st.markdown("#### 🔄 Passo 4: Processar com Claude 3.5 Sonnet")
+    
+    col_btn_processar, col_btn_cancelar = st.columns(2)
+    
+    with col_btn_processar:
+        btn_processar = st.button(
+            "🚀 Processar com Claude 3.5 Sonnet",
+            type="primary",
+            use_container_width=True
+        )
+    
+    with col_btn_cancelar:
+        if st.button("❌ Cancelar", use_container_width=True):
+            st.info("Importação cancelada.")
+            return False, {}
+    
+    if not btn_processar:
+        return False, {}
+    
+    # Processar os PDFs
+    st.markdown("---")
+    st.markdown("#### ⏳ Processando...")
+    
+    # 1. Consolidar PDFs
+    with st.spinner("📚 Consolidando PDFs..."):
+        texto_consolidado, total_paginas = consolidar_multiplos_pdfs(uploaded_files)
+    
+    if not texto_consolidado:
+        st.error("❌ Erro ao consolidar PDFs. Tente novamente.")
+        return False, {}
+    
+    st.success(f"✅ {len(uploaded_files)} PDF(s) consolidados ({total_paginas} páginas)")
+    
+    # 2. Enviar para Claude
+    st.markdown("---")
+    dados_extraidos, tokens_entrada, tokens_saida, custo_real = analisar_processo_judicial(texto_consolidado)
+    
+    if not dados_extraidos:
+        st.error("❌ Erro ao processar com Claude. Tente novamente.")
+        return False, {}
+    
+    custo_real_brl = custo_real * 5.00
+    
+    st.success(f"✅ Análise concluída!")
+    
+    # Mostrar custo real
+    col_custo_real1, col_custo_real2 = st.columns(2)
+    with col_custo_real1:
+        st.metric("💵 Custo Real", f"R$ {custo_real_brl:.2f}")
+    with col_custo_real2:
+        st.metric("🎯 Tokens Usados", f"{tokens_entrada + tokens_saida:,}")
+    
+    # ==================== ETAPA 5: REVISÃO ====================
+    st.markdown("---")
+    st.markdown("#### 👁️ Passo 5: Revisar Dados Extraídos")
+    
+    # Abas de revisão
+    tab_resumo, tab_identificacao, tab_contrato, tab_sst, tab_quesitos, tab_raw = st.tabs([
+        "📊 Resumo",
+        "👤 Identificação",
+        "📋 Contrato",
+        "🛡️ SST & Documentos",
+        "❓ Quesitos",
+        "📄 JSON Bruto"
+    ])
+    
+    with tab_resumo:
+        st.markdown("**Resumo dos Dados Extraídos:**")
+        
+        col_res1, col_res2 = st.columns(2)
+        
+        with col_res1:
+            st.write(f"**Processo:** {dados_extraidos.get('processo_num', '[Não localizado]')}")
+            st.write(f"**Reclamante:** {dados_extraidos.get('reclamante_nome', '[Não localizado]')}")
+            st.write(f"**Reclamada:** {dados_extraidos.get('reclamada_nome', '[Não localizado]')}")
+        
+        with col_res2:
+            st.write(f"**Órgão Julgador:** {dados_extraidos.get('orgao_julgador', '[Não localizado]')}")
+            st.write(f"**Data Autuação:** {dados_extraidos.get('data_autuacao', '[Não localizado]')}")
+            st.write(f"**Valor da Causa:** {dados_extraidos.get('valor_causa', '[Não localizado]')}")
+    
+    with tab_identificacao:
+        st.markdown("**Identificação das Partes:**")
+        
+        col_ident1, col_ident2 = st.columns(2)
+        
+        with col_ident1:
+            st.write("**Reclamante:**")
+            st.write(f"- Nome: {dados_extraidos.get('reclamante_nome', '[Não localizado]')}")
+            st.write(f"- CPF: {dados_extraidos.get('reclamante_cpf', '[Não localizado]')}")
+            st.write(f"- Data Nascimento: {dados_extraidos.get('segurado_nascimento', '[Não localizado]')}")
+            st.write(f"- Profissão: {dados_extraidos.get('profissao_cargo', '[Não localizado]')}")
+        
+        with col_ident2:
+            st.write("**Reclamada:**")
+            st.write(f"- Empresa: {dados_extraidos.get('reclamada_nome', '[Não localizado]')}")
+            st.write(f"- CNPJ: {dados_extraidos.get('reclamada_cnpj', '[Não localizado]')}")
+            st.write(f"- Setor: {dados_extraidos.get('setor', '[Não localizado]')}")
+    
+    with tab_contrato:
+        st.markdown("**Dados Contratuais:**")
+        
+        st.write(f"**Data Admissão:** {dados_extraidos.get('data_admissao', '[Não localizado]')}")
+        st.write(f"**Status:** {dados_extraidos.get('status_contrato', '[Não localizado]')}")
+        st.write(f"**Período Imprescrito:** {dados_extraidos.get('periodo_imprescrito', '[Não localizado]')}")
+        st.write(f"**Cargos:** {dados_extraidos.get('cargos', '[Não localizado]')}")
+        st.write(f"**Última Remuneração:** {dados_extraidos.get('ultima_remuneracao', '[Não localizado]')}")
+    
+    with tab_sst:
+        st.markdown("**SST & Análise de Documentos:**")
+        
+        st.write("**Agentes Nocivos:**")
+        st.write(dados_extraidos.get('agentes_alegados', '[Não localizado]'))
+        
+        st.markdown("---")
+        st.write("**Análise LTCAT:**")
+        st.write(dados_extraidos.get('doc_ltcat', '[Não localizado]'))
+        
+        st.markdown("---")
+        st.write("**Análise PPP:**")
+        st.write(dados_extraidos.get('doc_ppp', '[Não localizado]'))
+    
+    with tab_quesitos:
+        st.markdown("**Quesitos Formulados:**")
+        
+        st.write("**Quesitos do Juízo:**")
+        st.write(dados_extraidos.get('quesitos_juizo', '[Não localizado]'))
+        
+        st.markdown("---")
+        st.write("**Quesitos do Reclamante:**")
+        st.write(dados_extraidos.get('quesitos_autor', '[Não localizado]'))
+        
+        st.markdown("---")
+        st.write("**Quesitos da Reclamada:**")
+        st.write(dados_extraidos.get('quesitos_reu', '[Não localizado]'))
+    
+    with tab_raw:
+        st.markdown("**JSON Bruto (Para Debug):**")
+        import json
+        st.json(dados_extraidos)
+    
+    # ==================== ETAPA 6: CONFIRMAÇÃO ====================
+    st.markdown("---")
+    st.markdown("#### ✅ Passo 6: Confirmar e Preencher Campos")
+    
+    col_conf1, col_conf2 = st.columns(2)
+    
+    with col_conf1:
+        btn_confirmar = st.button(
+            "✅ Confirmar e Preencher Campos",
+            type="primary",
+            use_container_width=True
+        )
+    
+    with col_conf2:
+        btn_descartar = st.button(
+            "❌ Descartar",
+            use_container_width=True
+        )
+    
+    if btn_descartar:
+        st.info("Dados descartados. Você pode fazer novo upload.")
+        return False, {}
+    
+    if not btn_confirmar:
+        return False, dados_extraidos
+    
+    # Preencher campos do processo
+    st.markdown("---")
+    st.markdown("#### 📝 Preenchendo Campos Automaticamente...")
+    
+    # Mapear dados extraídos para campos do app
+    campos_mapeados = {
+        "processo_num": "processo_num",
+        "orgao_julgador": "orgao_julgador",
+        "data_autuacao": "data_autuacao",
+        "valor_causa": "valor_causa",
+        "rito_processual": "rito_processual",
+        "reclamante_nome": "reclamante_nome",
+        "reclamante_cpf": "reclamante_cpf",
+        "reclamante_adv": "reclamante_adv",
+        "reclamada_nome": "reclamada_nome",
+        "reclamada_cnpj": "reclamada_cnpj",
+        "reclamada_adv": "reclamada_adv",
+        "data_admissao": "data_admissao",
+        "status_contrato": "status_contrato",
+        "periodo_imprescrito": "periodo_imprescrito",
+        "cargos": "cargos",
+        "setor": "setor",
+        "ultima_remuneracao": "ultima_remuneracao",
+        "objeto_pericia": "objeto_pericia",
+        "atividades_inicial": "atividades_inicial",
+        "agentes_alegados": "agentes_alegados",
+        "pedidos_tecnicos": "pedidos_tecnicos",
+        "preliminares_periciais": "preliminares_periciais",
+        "defesa_merito_sst": "defesa_merito_sst",
+        "fase_processual": "fase_processual",
+        "campo_data": "campo_data",
+        "campo_horario": "campo_horario",
+        "local_diligencia": "local_diligencia",
+        "doc_ltcat": "doc_ltcat",
+        "doc_laudo": "doc_laudo",
+        "doc_ppp": "doc_ppp",
+        "doc_pgr": "doc_pgr",
+        "doc_os": "doc_os",
+        "doc_asos": "doc_asos",
+        "doc_outros": "doc_outros",
+        "quesitos_juizo": "quesitos_juizo",
+        "quesitos_autor": "quesitos_autor",
+        "quesitos_reu": "quesitos_reu",
+        "segurado_nascimento": "segurado_nascimento",
+        "profissao_cargo": "profissao_cargo",
+        "relato_inicial": "relato_inicial",
+        "apr_fisicos": "apr_fisicos",
+        "apr_quimicos": "apr_quimicos",
+        "apr_biologicos": "apr_biologicos",
+        "enquadramento_legal_prev": "enquadramento_legal_prev",
+        "presentes_pericia": "presentes_pericia",
+        "campo_declaracoes_autor": "campo_declaracoes_autor",
+        "campo_declaracoes_reu": "campo_declaracoes_reu",
+        "campo_medicoes": "campo_medicoes",
+    }
+    
+    campos_preenchidos = 0
+    for campo_app, campo_ia in campos_mapeados.items():
+        valor = dados_extraidos.get(campo_ia)
+        
+        # Preencher apenas se não for vazio e não for a mensagem padrão
+        if valor and valor != "[Não localizado nos documentos]":
+            p_atual[campo_app] = valor
+            campos_preenchidos += 1
+    
+    # Tratar EPIs se houver
+    if dados_extraidos.get("quadro_epis"):
+        p_atual["quadro_epis"] = dados_extraidos.get("quadro_epis", [])
+    
+    # Registrar importação no Firebase
+    st.markdown("📊 Registrando importação...")
+    
+    nomes_arquivos = [f.name for f in uploaded_files]
+    sucesso_registro = registrar_importacao_ia(
+        processo_id=processo_id_selecionado,
+        nomes_arquivos=nomes_arquivos,
+        tokens_entrada=tokens_entrada,
+        tokens_saida=tokens_saida,
+        custo_real=custo_real,
+        dados_extraidos=dados_extraidos
+    )
+    
+    if sucesso_registro:
+        st.success(f"✅ Importação registrada! {campos_preenchidos} campos preenchidos automaticamente.")
+    else:
+        st.warning(f"⚠️ Importação concluída mas erro ao registrar. {campos_preenchidos} campos preenchidos.")
+    
+    return True, p_atual
