@@ -6,3 +6,10 @@ __pycache__/
 *.pyc
 .DS_Store
 *.log
+
+# Extração em lote de PDFs (dados sensíveis gerados em tempo de execução)
+data/input/
+data/output/
+data/logs/
+data/failed/
+*.json.tmp
