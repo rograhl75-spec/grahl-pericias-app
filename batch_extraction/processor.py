@@ -190,8 +190,8 @@ def run_isolated(pdf_path: Path, config: BatchConfig, ocr_status: OcrStatus, out
     return _failure_result(pdf_path, output_path, mensagem, inicio)
 
 
-def _copy_failed(pdf_path: Path, failed_dir: Path) -> Optional[Path]:
-    destino = failed_dir / pdf_path.name
+def _copy_failed(pdf_path: Path, failed_dir: Path, nome_saida: str) -> Optional[Path]:
+    destino = failed_dir / (Path(nome_saida).stem + pdf_path.suffix)
     try:
         shutil.copy2(pdf_path, destino)
         return destino
@@ -264,7 +264,7 @@ def run_batch(config: BatchConfig, recursive: bool = False, log_file: Optional[P
         if status == STATUS_FAILED:
             logger.error("%s FALHA: %s -> %s", prefixo, pdf_path.name, "; ".join(resumo.get("erros", [])) or "erro desconhecido")
             if config.copy_failed:
-                copia = _copy_failed(pdf_path, Path(config.failed_dir))
+                copia = _copy_failed(pdf_path, Path(config.failed_dir), saida.name)
                 if copia:
                     resumo["copia_falha"] = str(copia)
         else:
