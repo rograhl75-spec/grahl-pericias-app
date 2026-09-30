@@ -405,6 +405,39 @@ class PdfProcessorTests(unittest.TestCase):
             with self.assertRaises(pdf_processor.LimiteTextoPDFExcedido):
                 pdf_processor.extrair_texto_lote(arquivos, lote, max_chars=1_000)
 
+    def test_lotes_cheios_com_limites_padrao_cabem_nos_chunks_reais_da_claude(self):
+        import random
+        from core import ai_claude
+        from core.config import APP_CONFIG_DEFAULTS
+
+        gerador = random.Random(42)
+        textos = ["x" * gerador.randint(2_000, 4_000) for _ in range(800)]  # ~2,4M caracteres
+        arquivos = [DummyUpload("PARTE_1.PDF", b"%PDF-1.7")]
+        config = dict(APP_CONFIG_DEFAULTS)
+
+        with (
+            mock.patch.object(ai_claude, "obter_app_config", return_value=config),
+            mock.patch.object(pdf_processor.pdfplumber, "open", side_effect=lambda *_: self._pdf_falso(textos)),
+        ):
+            chunk_chars, max_chunks = ai_claude.obter_parametros_chunk_lote()
+            lotes = pdf_processor.planejar_lotes_pdf(
+                arquivos,
+                max_chars_lote=config["max_pdf_chars_total"],
+                max_lotes=config["max_pdf_batches"],
+                chunk_chars=chunk_chars,
+                max_chunks=max_chunks,
+            )
+            self.assertGreater(len(lotes), 1)
+            for lote in lotes:
+                texto, _ = pdf_processor.extrair_texto_lote(
+                    arquivos, lote, max_chars=config["max_pdf_chars_total"]
+                )
+                self.assertLessEqual(len(texto), config["max_pdf_chars_total"])
+                self.assertLessEqual(lote["chunks"], max_chunks)
+                # Não pode lançar "blocos de análise acima do limite".
+                chamadas_reais = ai_claude.estimar_chamadas_necessarias(texto, modo_conservador=True)
+                self.assertLessEqual(chamadas_reais, ai_claude.chamadas_para_chunks(lote["chunks"]))
+
     def test_padroes_de_lote_documentados(self):
         from core.config import APP_CONFIG_DEFAULTS
 

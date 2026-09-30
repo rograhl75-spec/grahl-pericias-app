@@ -4,6 +4,7 @@ Suporta múltiplos PDFs consolidados em um único texto.
 """
 
 import logging
+import math
 from contextlib import contextmanager
 import os
 import tempfile
@@ -266,14 +267,39 @@ def mensagem_limite_lotes_excedido(max_chars_lote: int, max_lotes: int) -> str:
     )
 
 
+def _simular_chunk(estado: Tuple[int, int], tamanho: int, limite: int) -> Tuple[int, int]:
+    """
+    Replica o empacotamento sequencial de `core.ai_claude._dividir_texto_em_chunks`
+    (quebra em páginas/arquivos) usando apenas tamanhos. Estado: (chunks fechados,
+    caracteres no chunk atual). Superestimar tamanhos nunca reduz a contagem.
+    """
+    fechados, atual = estado
+    if tamanho > limite:
+        if atual > 0:
+            fechados += 1
+        return fechados + math.ceil(tamanho / limite), 0
+    if atual + tamanho > limite and atual > 0:
+        return fechados + 1, tamanho
+    return fechados, atual + tamanho
+
+
+def _total_chunks(estado: Tuple[int, int]) -> int:
+    fechados, atual = estado
+    return fechados + (1 if atual > 0 else 0)
+
+
 def planejar_lotes_pdf(
     arquivos_pdf: List,
     max_chars_lote: Optional[int] = None,
     max_lotes: Optional[int] = None,
+    chunk_chars: Optional[int] = None,
+    max_chunks: Optional[int] = None,
 ) -> List[Dict]:
     """
     Divide os PDFs em lotes sequenciais de intervalos de páginas, cada um com no máximo
-    `max_chars_lote` caracteres (mesma contagem usada na extração do lote).
+    `max_chars_lote` caracteres (mesma contagem usada na extração do lote) e, quando
+    `chunk_chars`/`max_chunks` são informados, no máximo `max_chunks` blocos de análise
+    da Claude (simulando a divisão real, que só quebra entre páginas).
 
     Apenas o tamanho do texto de cada página é mantido; o texto é descartado logo após
     a medição. Nunca trunca: uma página maior que o lote ou lotes acima de `max_lotes`
@@ -281,10 +307,22 @@ def planejar_lotes_pdf(
 
     Returns:
         Lista de lotes: {"indice", "partes": [{"arquivo_idx", "arquivo", "pagina_inicio",
-        "pagina_fim", "total_paginas_arquivo"}], "chars", "paginas"}
+        "pagina_fim", "total_paginas_arquivo"}], "chars", "paginas", "chunks"}
     """
     max_chars_lote = obter_limite_chars_total() if max_chars_lote is None else int(max_chars_lote)
     max_lotes = obter_max_lotes() if max_lotes is None else int(max_lotes)
+    simular = chunk_chars is not None and max_chunks is not None
+    limite_chunk = max(int(chunk_chars), 1) if simular else 0
+
+    def _estado_com(estado: Tuple[int, int], tamanhos: List[int]) -> Tuple[int, int]:
+        if not simular:
+            return estado
+        for tamanho in tamanhos:
+            estado = _simular_chunk(estado, tamanho, limite_chunk)
+        return estado
+
+    def _excede_chunks(estado: Tuple[int, int]) -> bool:
+        return simular and _total_chunks(estado) > int(max_chunks)
     lotes: List[Dict] = []
     atual: Optional[Dict] = None
 
@@ -316,13 +354,26 @@ def planejar_lotes_pdf(
                         tamanho = len(_bloco_pagina(num_pagina, texto_pagina))
                         del texto_pagina
                         chars_arquivo += tamanho
+                        # O segmento da página pode carregar o "\n" inicial do próximo cabeçalho.
+                        segmento_pagina = tamanho + 1
 
                         parte = None
                         if atual and atual["partes"] and atual["partes"][-1]["arquivo_idx"] == idx:
                             parte = atual["partes"][-1]
                         custo = tamanho + (0 if parte else tamanho_cabecalho)
-                        if atual is None or atual["chars"] + custo > max_chars_lote:
-                            if tamanho + tamanho_cabecalho > max_chars_lote:
+                        novo_estado = None
+                        if atual is not None:
+                            novo_estado = _estado_com(
+                                atual["_chunks"],
+                                [segmento_pagina] if parte else [tamanho_cabecalho, segmento_pagina],
+                            )
+                        if (
+                            atual is None
+                            or atual["chars"] + custo > max_chars_lote
+                            or _excede_chunks(novo_estado)
+                        ):
+                            novo_estado = _estado_com((0, 0), [tamanho_cabecalho, segmento_pagina])
+                            if tamanho + tamanho_cabecalho > max_chars_lote or _excede_chunks(novo_estado):
                                 raise LimiteTextoPDFExcedido(
                                     f"A página {num_pagina} do arquivo '{nome_arquivo}' sozinha ultrapassa o "
                                     f"limite de {_formatar_inteiro(max_chars_lote)} caracteres por lote "
@@ -332,7 +383,13 @@ def planejar_lotes_pdf(
                                 raise LimiteTextoPDFExcedido(
                                     mensagem_limite_lotes_excedido(max_chars_lote, max_lotes)
                                 )
-                            atual = {"indice": len(lotes) + 1, "partes": [], "chars": 0, "paginas": 0}
+                            atual = {
+                                "indice": len(lotes) + 1,
+                                "partes": [],
+                                "chars": 0,
+                                "paginas": 0,
+                                "_chunks": (0, 0),
+                            }
                             lotes.append(atual)
                             parte = None
                             custo = tamanho + tamanho_cabecalho
@@ -347,6 +404,7 @@ def planejar_lotes_pdf(
                             atual["partes"].append(parte)
                         parte["pagina_fim"] = num_pagina
                         atual["chars"] += custo
+                        atual["_chunks"] = novo_estado
         except ValueError:
             raise
         except Exception as exc:
@@ -366,6 +424,8 @@ def planejar_lotes_pdf(
         lote["paginas"] = sum(
             parte["pagina_fim"] - parte["pagina_inicio"] + 1 for parte in lote["partes"]
         )
+        estado_chunks = lote.pop("_chunks")
+        lote["chunks"] = max(_total_chunks(estado_chunks), 1) if simular else 1
     return lotes
 
 

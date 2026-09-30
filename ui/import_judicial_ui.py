@@ -24,8 +24,9 @@ from core.ai_claude import (
     analisar_processo_judicial,
     estimar_custo,
     estimar_chamadas_necessarias,
-    estimar_chamadas_por_tamanho,
     estimar_custo_texto_brl,
+    obter_parametros_chunk_lote,
+    chamadas_para_chunks,
 )
 from core.batch_import import consolidar_resultados_lotes
 from core.config import APP_CONFIG_DEFAULTS, obter_app_config, obter_taxa_cambio_usd_brl
@@ -298,15 +299,6 @@ def _limite_chars_importacao(config: Dict) -> int:
         return padrao
 
 
-def _lote_em_modo_conservador(lote: Dict, config: Dict) -> bool:
-    try:
-        limiar_pdfs = int(config.get("cloud_conservative_pdf_count_threshold", 2))
-        limiar_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
-    except (TypeError, ValueError):
-        limiar_pdfs, limiar_chars = 2, 600_000
-    return len(lote.get("partes", [])) >= limiar_pdfs or int(lote.get("chars", 0)) >= limiar_chars
-
-
 def _renderizar_resumo_lotes(revisao: Dict) -> None:
     lotes = revisao.get("lotes", [])
     st.info(
@@ -425,18 +417,23 @@ def _processar_em_lotes(
         )
         return None
 
+    # Os lotes sempre usam o modo conservador (blocos menores), e o planejamento
+    # garante que cada lote caiba no máximo de blocos da Claude.
     try:
+        chunk_chars, max_chunks = obter_parametros_chunk_lote()
         with st.spinner("📐 Planejando os lotes (medindo o texto de cada página)..."):
-            lotes = planejar_lotes_pdf(uploaded_files, max_chars_lote=max_chars_lote)
+            lotes = planejar_lotes_pdf(
+                uploaded_files,
+                max_chars_lote=max_chars_lote,
+                chunk_chars=chunk_chars,
+                max_chunks=max_chunks,
+            )
     except Exception as exc:
         return _falhar("planejar os lotes", arquivos_resumo, exc)
 
     total_lotes = len(lotes)
     try:
-        chamadas_por_lote = [
-            estimar_chamadas_por_tamanho(lote["chars"], _lote_em_modo_conservador(lote, config))
-            for lote in lotes
-        ]
+        chamadas_por_lote = [chamadas_para_chunks(lote.get("chunks", 1)) for lote in lotes]
         custos_por_lote = [
             estimar_custo_texto_brl(lote["chars"], chamadas)
             for lote, chamadas in zip(lotes, chamadas_por_lote)
@@ -480,7 +477,6 @@ def _processar_em_lotes(
     resultados = []
     tokens_entrada = tokens_saida = chamadas_realizadas = total_paginas = tamanho_total = 0
     custo_real = 0.0
-    algum_conservador = False
 
     for posicao, lote in enumerate(lotes, start=1):
         etapa = f"lote {posicao} de {total_lotes}"
@@ -493,8 +489,7 @@ def _processar_em_lotes(
             if not texto_lote.strip():
                 raise ValueError("O lote não possui texto legível para análise.")
             tamanho_lote = len(texto_lote)
-            modo_conservador = _lote_em_modo_conservador(lote, config)
-            chamadas_lote = estimar_chamadas_necessarias(texto_lote, modo_conservador=modo_conservador)
+            chamadas_lote = estimar_chamadas_necessarias(texto_lote, modo_conservador=True)
             custo_lote_brl = estimar_custo_texto_brl(tamanho_lote, chamadas_lote)
             permitido, hoje, limite = validar_limite_chamadas_claude(chamadas_lote)
             if not permitido:
@@ -512,7 +507,7 @@ def _processar_em_lotes(
             dados_lote, t_entrada, t_saida, custo_lote, n_chamadas = analisar_processo_judicial(
                 texto_lote,
                 processo_id=processo_id,
-                modo_conservador=modo_conservador,
+                modo_conservador=True,
                 custo_estimado_brl=custo_lote_brl,
             )
         except Exception as exc:
@@ -532,7 +527,6 @@ def _processar_em_lotes(
         chamadas_realizadas += int(n_chamadas or 0)
         total_paginas += int(paginas_lote or 0)
         tamanho_total += tamanho_lote
-        algum_conservador = algum_conservador or modo_conservador
         barra.progress(posicao / total_lotes, text=f"Lote {posicao} de {total_lotes} concluído: {descricao}")
 
     try:
@@ -544,7 +538,7 @@ def _processar_em_lotes(
         "assinatura": assinatura_arquivos,
         "tamanho_texto": tamanho_total,
         "total_paginas": total_paginas,
-        "modo_conservador": algum_conservador,
+        "modo_conservador": True,
         "dados_extraidos": dados_consolidados,
         "tokens_entrada": tokens_entrada,
         "tokens_saida": tokens_saida,

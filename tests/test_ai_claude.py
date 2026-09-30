@@ -51,13 +51,12 @@ class AiClaudeTests(unittest.TestCase):
 
         self.assertEqual(len(chunks), 10)
 
-    def test_estimativas_por_tamanho_para_lotes(self):
+    def test_parametros_de_chunk_e_custo_para_lotes(self):
         config = {
             "claude_chunk_chars": 120_000,
             "claude_max_chunks": 10,
             "claude_chunk_chars_conservative": 80_000,
             "claude_max_chunks_conservative": 15,
-            "cloud_conservative_chars_threshold": 600_000,
             "claude_model": "modelo-x",
             "claude_model_pricing": {
                 "modelo-x": {"input_usd_per_million_tokens": 3.0, "output_usd_per_million_tokens": 15.0}
@@ -66,12 +65,11 @@ class AiClaudeTests(unittest.TestCase):
         }
 
         with mock.patch.object(ai_claude, "obter_app_config", return_value=config):
-            self.assertEqual(ai_claude.estimar_chamadas_por_tamanho(100_000), 1)
-            self.assertEqual(ai_claude.estimar_chamadas_por_tamanho(1_200_000), 16)
-            self.assertEqual(ai_claude.estimar_chamadas_por_tamanho(1_200_000 - 1), 16)
-            self.assertEqual(ai_claude.estimar_chamadas_por_tamanho(300_000, modo_conservador=True), 5)
+            self.assertEqual(ai_claude.obter_parametros_chunk_lote(), (80_000, 15))
             custo = ai_claude.estimar_custo_texto_brl(300_000, 2)
 
+        self.assertEqual(ai_claude.chamadas_para_chunks(1), 1)
+        self.assertEqual(ai_claude.chamadas_para_chunks(15), 16)
         esperado = ((100_000 * 3.0 + 8192 * 15.0) / 1_000_000) * 5.0 * 1.2
         self.assertAlmostEqual(custo, esperado)
 

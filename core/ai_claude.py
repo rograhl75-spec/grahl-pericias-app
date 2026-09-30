@@ -410,21 +410,31 @@ def estimar_chamadas_necessarias(texto_consolidado: str, modo_conservador: bool 
         modo_conservador=modo_conservador,
     )
     chunks = _dividir_texto_em_chunks(texto_consolidado, limite_chars, max_chunks)
-    return len(chunks) if len(chunks) == 1 else len(chunks) + 1
+    return chamadas_para_chunks(len(chunks))
 
 
-def estimar_chamadas_por_tamanho(tamanho_texto: int, modo_conservador: bool = False) -> int:
+def obter_parametros_chunk_lote() -> Tuple[int, int]:
     """
-    Estimativa de chamadas Claude a partir apenas do tamanho do texto (sem mantê-lo em
-    memória), usada no planejamento da importação em lotes. A divisão real em chunks
-    respeita quebras de página e pode gerar alguns blocos a mais; por isso cada lote é
-    revalidado com `estimar_chamadas_necessarias` antes da chamada.
+    Tamanho de chunk e máximo de chunks aplicados a cada lote da importação em lotes.
+    Os lotes sempre usam o modo conservador; os valores coincidem com os de
+    `_resolver_parametros_chunk` nesse modo para textos de até
+    tamanho_chunk x max_chunks caracteres.
     """
     config = obter_app_config()
-    limite_chars, _, _ = _resolver_parametros_chunk_por_tamanho(
-        max(int(tamanho_texto), 0), config, modo_conservador
+    limite = min(
+        int(config.get("claude_chunk_chars", 120_000)),
+        int(config.get("claude_chunk_chars_conservative", 80_000)),
     )
-    chunks = max(1, math.ceil(max(int(tamanho_texto), 1) / max(limite_chars, 1)))
+    max_chunks = max(
+        int(config.get("claude_max_chunks", 10)),
+        int(config.get("claude_max_chunks_conservative", 15)),
+    )
+    return max(limite, 1), max(max_chunks, 1)
+
+
+def chamadas_para_chunks(chunks: int) -> int:
+    """Chamadas Claude para `chunks` blocos: cada bloco mais a consolidação final quando há mais de um."""
+    chunks = max(int(chunks), 1)
     return chunks if chunks == 1 else chunks + 1
 
 

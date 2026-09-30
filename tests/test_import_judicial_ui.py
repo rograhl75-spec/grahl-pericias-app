@@ -547,6 +547,7 @@ class ImportJudicialUiTests(unittest.TestCase):
                 }],
                 "chars": 1_150_000,
                 "paginas": 400,
+                "chunks": 15,
             },
             {
                 "indice": 2,
@@ -562,6 +563,7 @@ class ImportJudicialUiTests(unittest.TestCase):
                 ],
                 "chars": 900_000,
                 "paginas": 420,
+                "chunks": 15,
             },
         ]
 
@@ -597,7 +599,7 @@ class ImportJudicialUiTests(unittest.TestCase):
             "obter_max_lotes": mock.Mock(return_value=4),
             "planejar_lotes_pdf": mock.Mock(return_value=self._lotes_planejados()),
             "extrair_texto_lote": mock.Mock(side_effect=[("X" * 5_000, 400), ("Y" * 5_000, 420)]),
-            "estimar_chamadas_por_tamanho": mock.Mock(return_value=16),
+            "obter_parametros_chunk_lote": mock.Mock(return_value=(80_000, 15)),
             "estimar_chamadas_necessarias": mock.Mock(return_value=16),
             "estimar_custo_texto_brl": mock.Mock(return_value=12.0),
             "consolidar_multiplos_pdfs": mock.Mock(),
