@@ -337,7 +337,7 @@ class ImportJudicialUiTests(unittest.TestCase):
             "max_api_calls_per_day": 50,
             "cloud_conservative_pdf_count_threshold": 2,
             "cloud_conservative_chars_threshold": 600_000,
-            "max_pdf_chars_total": 800_000,
+            "max_pdf_chars_total": 1_200_000,
         }
 
     def _patches_fluxo_feliz(self, texto="texto consolidado", paginas=10):
@@ -455,7 +455,50 @@ class ImportJudicialUiTests(unittest.TestCase):
         self.assertEqual(registro, {})
         analisar.assert_not_called()
         mensagens = [call.args[0] for call in streamlit.error.call_args_list if call.args]
-        self.assertTrue(any("limite operacional" in mensagem for mensagem in mensagens))
+        self.assertTrue(any("limite de 1.000 caracteres" in mensagem for mensagem in mensagens))
+        self.assertTrue(any("divida o processo em lotes menores" in mensagem for mensagem in mensagens))
+
+    def test_limite_de_caracteres_na_extracao_bloqueia_sem_alterar_processo(self):
+        streamlit, _ = self._streamlit_para_fluxo([True, False])
+        config = self._config_padrao()
+        erro_limite = import_judicial_ui.LimiteTextoPDFExcedido(
+            import_judicial_ui.mensagem_limite_chars_excedido(1_200_000, "PARTE_2.PDF")
+        )
+        processo_original = {"foo": "bar", "processo_num": "0001"}
+
+        with (
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            mock.patch.object(import_judicial_ui, "obter_app_config", return_value=config),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=10),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=1.0),
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=5.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=0.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=0),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 0.0, 250.0)),
+            mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", side_effect=erro_limite),
+            mock.patch.object(import_judicial_ui, "analisar_processo_judicial") as analisar,
+            mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia") as criar_registro,
+        ):
+            sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf(
+                "Proc_01", processo_original
+            )
+
+        self.assertFalse(sucesso)
+        self.assertIs(dados, processo_original)
+        self.assertEqual(dados, {"foo": "bar", "processo_num": "0001"})
+        self.assertEqual(registro, {})
+        analisar.assert_not_called()
+        criar_registro.assert_not_called()
+        self.assertFalse(any(isinstance(valor, dict) for valor in streamlit.session_state.values()))
+        streamlit.expander.assert_not_called()
+        mensagens = [call.args[0] for call in streamlit.error.call_args_list if call.args]
+        self.assertEqual(len(mensagens), 1)
+        self.assertIn("1.200.000 caracteres", mensagens[0])
+        self.assertIn("PARTE_2.PDF", mensagens[0])
+        self.assertIn("processo não foi alterado", mensagens[0])
+        self.assertIn("divida o processo em lotes menores", mensagens[0])
 
     def test_sessao_nao_guarda_texto_consolidado_completo(self):
         streamlit, _ = self._streamlit_para_fluxo([True, False, False, False])
