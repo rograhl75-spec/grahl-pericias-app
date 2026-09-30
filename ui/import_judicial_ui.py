@@ -9,13 +9,15 @@ import traceback
 import hashlib
 from typing import Dict, Tuple
 from core.pdf_processor import (
+    LimiteTextoPDFExcedido,
+    mensagem_limite_chars_excedido,
     validar_pdfs,
     consolidar_multiplos_pdfs,
     calcular_total_paginas,
     validar_limite_paginas,
 )
 from core.ai_claude import analisar_processo_judicial, estimar_custo, estimar_chamadas_necessarias
-from core.config import obter_app_config, obter_taxa_cambio_usd_brl
+from core.config import APP_CONFIG_DEFAULTS, obter_app_config, obter_taxa_cambio_usd_brl
 from core.cost_tracker import (
     criar_registro_importacao_ia,
     validar_limite_diario,
@@ -493,10 +495,11 @@ def _executar_tela_importacao_pdf(
     
     # 1. Consolidar PDFs (o texto completo nunca é mantido em st.session_state)
     texto_consolidado = ""
+    max_chars_padrao = int(APP_CONFIG_DEFAULTS["max_pdf_chars_total"])
     try:
-        max_chars_total = max(int(config.get("max_pdf_chars_total", 800_000)), 0)
+        max_chars_total = max(int(config.get("max_pdf_chars_total", max_chars_padrao)), 0)
     except (TypeError, ValueError):
-        max_chars_total = 800_000
+        max_chars_total = max_chars_padrao
 
     if revisao_pendente:
         total_paginas = revisao_pendente.get("total_paginas", 0)
@@ -506,6 +509,17 @@ def _executar_tela_importacao_pdf(
         try:
             with st.spinner("📚 Consolidando PDFs..."):
                 texto_consolidado, total_paginas = consolidar_multiplos_pdfs(uploaded_files)
+        except LimiteTextoPDFExcedido as exc:
+            logger.warning(
+                "Importação judicial bloqueada por limite de caracteres | processo=%s | arquivos=%s | limite=%s | erro=%s",
+                processo_id_selecionado,
+                _resumir_arquivos(uploaded_files),
+                max_chars_total,
+                exc,
+            )
+            st.error(f"❌ {exc}")
+            st.caption(f"Processo: {processo_id_selecionado} • Arquivos: {_resumir_arquivos(uploaded_files)}")
+            return False, p_atual, {}
         except Exception as exc:
             _exibir_erro_processamento(
                 "consolidar os PDFs",
@@ -536,11 +550,7 @@ def _executar_tela_importacao_pdf(
                 tamanho_texto,
                 max_chars_total,
             )
-            st.error(
-                "❌ O texto extraído dos PDFs ultrapassa o limite operacional desta instalação "
-                f"({tamanho_texto:,} de {max_chars_total:,} caracteres). "
-                "Divida o processo em lotes menores ou ajuste 'max_pdf_chars_total' nas configurações."
-            )
+            st.error(f"❌ {mensagem_limite_chars_excedido(max_chars_total)}")
             st.caption(f"Processo: {processo_id_selecionado} • Arquivos: {_resumir_arquivos(uploaded_files)}")
             return False, p_atual, {}
 

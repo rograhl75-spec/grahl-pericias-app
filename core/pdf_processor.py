@@ -13,13 +13,40 @@ from typing import List, Optional, Tuple
 import pdfplumber
 import streamlit as st
 
-from core.config import obter_app_config
+from core.config import APP_CONFIG_DEFAULTS, obter_app_config
 
 logger = logging.getLogger(__name__)
 
 
+class LimiteTextoPDFExcedido(ValueError):
+    """O texto extraído dos PDFs ultrapassou `max_pdf_chars_total`."""
+
+
 def _formatar_inteiro(valor: int) -> str:
     return f"{valor:,}".replace(",", ".")
+
+
+def obter_limite_chars_total() -> int:
+    """Limite configurado de caracteres para uma importação (padrão em APP_CONFIG_DEFAULTS)."""
+    padrao = int(APP_CONFIG_DEFAULTS["max_pdf_chars_total"])
+    try:
+        return max(int(obter_app_config().get("max_pdf_chars_total", padrao)), 0)
+    except (TypeError, ValueError):
+        logger.warning("Valor inválido para max_pdf_chars_total; usando o padrão %s.", padrao)
+        return padrao
+
+
+def mensagem_limite_chars_excedido(max_chars_total: int, nome_arquivo: Optional[str] = None) -> str:
+    """Mensagem única para o bloqueio por limite de caracteres, com orientação de como proceder."""
+    origem = f" ao ler o arquivo '{nome_arquivo}'" if nome_arquivo else ""
+    return (
+        f"O texto extraído dos PDFs ultrapassou{origem} o limite de "
+        f"{_formatar_inteiro(max_chars_total)} caracteres por importação (max_pdf_chars_total). "
+        "Nenhum dado foi importado e o processo não foi alterado. "
+        "Para continuar, divida o processo em lotes menores (por exemplo, importe PARTE_1 e "
+        "PARTE_2 em importações separadas), remova peças desnecessárias ou gere PDFs apenas com "
+        "as páginas relevantes e tente novamente."
+    )
 
 
 def tamanho_arquivo_seguro(arquivo) -> int:
@@ -79,6 +106,8 @@ def extrair_texto_pdf(caminho_pdf: str, max_chars: Optional[int] = None) -> Tupl
     
     Args:
         caminho_pdf: Caminho do arquivo PDF
+        max_chars: Limite de caracteres; ao ultrapassá-lo a extração é interrompida
+            com LimiteTextoPDFExcedido (nunca há truncamento silencioso).
         
     Returns:
         Tupla: (texto_extraido, numero_de_paginas)
@@ -92,14 +121,16 @@ def extrair_texto_pdf(caminho_pdf: str, max_chars: Optional[int] = None) -> Tupl
             num_paginas = len(pdf.pages)
             
             for num_pagina, pagina in enumerate(pdf.pages, 1):
-                texto_pagina = pagina.extract_text()
+                try:
+                    texto_pagina = pagina.extract_text()
+                finally:
+                    # Libera o cache de objetos da página para limitar o uso de memória.
+                    pagina.close()
                 if texto_pagina:
                     bloco_pagina = f"\n--- PÁGINA {num_pagina} ---\n{texto_pagina}\n"
                     total_chars += len(bloco_pagina)
                     if max_chars is not None and total_chars > max_chars:
-                        raise ValueError(
-                            "O conteúdo textual extraído ultrapassou o limite configurado para importação."
-                        )
+                        raise LimiteTextoPDFExcedido(mensagem_limite_chars_excedido(max_chars))
                     partes_texto.append(bloco_pagina)
         
         logger.info(f"PDF extraído com sucesso: {caminho_pdf} ({num_paginas} páginas)")
@@ -130,14 +161,20 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
     partes_consolidadas = []
     total_chars = 0
     total_paginas = 0
-    max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 1_200_000))
+    max_chars_total = obter_limite_chars_total()
     
     for idx, arquivo in enumerate(arquivos_pdf, 1):
         nome_arquivo = getattr(arquivo, "name", "arquivo_sem_nome")
+        cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {nome_arquivo}\n{'='*80}\n\n"
         try:
             with _arquivo_pdf_temporario(arquivo, f"temp_pdf_{idx}_") as temp_path:
-                chars_restantes = max(max_chars_total - total_chars, 0)
-                texto, num_paginas = extrair_texto_pdf(temp_path, max_chars=chars_restantes)
+                chars_restantes = max(max_chars_total - total_chars - len(cabecalho), 0)
+                try:
+                    texto, num_paginas = extrair_texto_pdf(temp_path, max_chars=chars_restantes)
+                except LimiteTextoPDFExcedido as exc:
+                    raise LimiteTextoPDFExcedido(
+                        mensagem_limite_chars_excedido(max_chars_total, nome_arquivo)
+                    ) from exc
 
             if num_paginas <= 0:
                 logger.warning("PDF ignorado por falha de leitura: %s", nome_arquivo)
@@ -155,13 +192,10 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
 
             total_paginas += num_paginas
 
-            cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {nome_arquivo}\n{'='*80}\n\n"
             tamanho_projetado = total_chars + len(cabecalho) + len(texto)
             if tamanho_projetado > max_chars_total:
-                raise ValueError(
-                    "O texto consolidado dos PDFs ultrapassa o limite de "
-                    f"{_formatar_inteiro(max_chars_total)} caracteres para uma única importação. "
-                    "Remova alguns arquivos, selecione menos páginas ou divida o processo em lotes menores."
+                raise LimiteTextoPDFExcedido(
+                    mensagem_limite_chars_excedido(max_chars_total, nome_arquivo)
                 )
 
             partes_consolidadas.append(cabecalho)
@@ -181,9 +215,12 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
         except ValueError:
             raise
         except Exception as e:
-            st.error(f"❌ Erro ao processar {nome_arquivo}: {e}")
+            # Falha fechada: nunca importar parcialmente os demais arquivos.
             logger.exception("Erro ao consolidar PDF %s", nome_arquivo)
-            continue
+            raise ValueError(
+                f"Não foi possível processar o arquivo '{nome_arquivo}' ({type(e).__name__}). "
+                "Nenhum dado foi importado; reenvie o arquivo ou substitua por uma versão íntegra do PDF."
+            ) from e
 
     return "".join(partes_consolidadas), total_paginas
 
@@ -243,7 +280,9 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
 
 
 def validar_limite_paginas(total_paginas: int) -> Tuple[bool, str]:
-    max_paginas = int(obter_app_config().get("max_pdf_pages_total", 3000))
+    max_paginas = int(
+        obter_app_config().get("max_pdf_pages_total", APP_CONFIG_DEFAULTS["max_pdf_pages_total"])
+    )
 
     if total_paginas < 0:
         return False, "❌ Não foi possível calcular o total de páginas dos PDFs enviados."
