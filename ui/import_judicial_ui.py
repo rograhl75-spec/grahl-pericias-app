@@ -79,20 +79,48 @@ CAMPOS_IMPORTACAO_MAPEADOS = {
 
 
 def _resumir_arquivos(arquivos_pdf) -> str:
-    nomes = [getattr(arquivo, "name", "arquivo_sem_nome") for arquivo in arquivos_pdf or []]
+    try:
+        nomes = [getattr(arquivo, "name", "arquivo_sem_nome") for arquivo in arquivos_pdf or []]
+    except Exception:
+        logger.warning("Não foi possível resumir os arquivos enviados", exc_info=True)
+        return "arquivos indisponíveis"
     return ", ".join(nomes) if nomes else "nenhum arquivo"
 
 
 def _assinatura_arquivos(arquivos_pdf) -> str:
-    digest = hashlib.sha256()
-    for arquivo in arquivos_pdf or []:
-        digest.update(arquivo.name.encode("utf-8", errors="replace"))
-        conteudo = arquivo.getvalue()
-        if isinstance(conteudo, (bytes, bytearray, memoryview)):
-            digest.update(conteudo)
-        else:
-            digest.update(str(getattr(arquivo, "size", 0)).encode("ascii"))
-    return digest.hexdigest()
+    """
+    Calcula uma assinatura estável dos uploads sem derrubar o app.
+
+    Falhas de leitura (``getvalue``/``size``) fazem a assinatura cair para os
+    metadados disponíveis em vez de propagar a exceção.
+    """
+    try:
+        digest = hashlib.sha256()
+        for arquivo in arquivos_pdf or []:
+            nome = str(getattr(arquivo, "name", "arquivo_sem_nome"))
+            digest.update(nome.encode("utf-8", errors="replace"))
+            conteudo = None
+            try:
+                conteudo = arquivo.getvalue()
+            except Exception:
+                logger.warning(
+                    "Não foi possível ler o conteúdo de '%s' para assinatura; usando metadados.",
+                    nome,
+                )
+            if isinstance(conteudo, (bytes, bytearray, memoryview)):
+                digest.update(conteudo)
+            else:
+                digest.update(str(getattr(arquivo, "size", 0)).encode("ascii", errors="replace"))
+        return digest.hexdigest()
+    except Exception:
+        logger.exception("Falha ao calcular assinatura dos PDFs enviados")
+        return f"assinatura-indisponivel::{_resumir_arquivos(arquivos_pdf)}"
+
+
+def _e_excecao_de_controle_streamlit(erro: BaseException) -> bool:
+    """Identifica exceções usadas pelo Streamlit para rerun/stop, que não devem ser capturadas."""
+    nomes = {tipo.__name__ for tipo in type(erro).__mro__}
+    return bool(nomes & {"RerunException", "StopException"})
 
 
 def _exibir_erro_processamento(
@@ -110,13 +138,16 @@ def _exibir_erro_processamento(
         arquivos,
         traceback_formatado,
     )
-    st.error(
-        f"❌ Falha na etapa '{etapa}'. Revise os PDFs enviados, tente novamente e, se o erro persistir, "
-        "consulte os detalhes técnicos abaixo."
-    )
-    st.caption(f"Processo: {processo_id} • Arquivos: {arquivos}")
-    with st.expander("Detalhes técnicos da falha"):
-        st.code(traceback_formatado)
+    try:
+        st.error(
+            f"❌ Falha na etapa '{etapa}'. Revise os PDFs enviados, tente novamente e, se o erro persistir, "
+            "consulte os detalhes técnicos abaixo."
+        )
+        st.caption(f"Processo: {processo_id} • Arquivos: {arquivos}")
+        with st.expander("Detalhes técnicos da falha"):
+            st.code(traceback_formatado)
+    except Exception:
+        logger.exception("Falha ao renderizar a mensagem de erro da importação judicial")
 
 
 def aplicar_dados_importados_ao_processo(p_atual: Dict, dados_extraidos: Dict) -> Tuple[Dict, int]:
@@ -136,6 +167,41 @@ def aplicar_dados_importados_ao_processo(p_atual: Dict, dados_extraidos: Dict) -
 
 
 def exibir_tela_importacao_pdf(
+    processo_id_selecionado: str,
+    p_atual: Dict,
+) -> Tuple[bool, Dict, Dict]:
+    """
+    Executa a tela de importação isolando qualquer falha inesperada.
+
+    Garante que erros não tratados na validação, consolidação, estimativa,
+    revisão, chamada Claude, criação do registro ou renderização do resultado
+    fiquem contidos na página (mensagem amigável) em vez de derrubar o app
+    inteiro com a tela global "Oh no. Error running app".
+    """
+    try:
+        return _renderizar_tela_importacao_pdf(processo_id_selecionado, p_atual)
+    except BaseException as exc:  # noqa: BLE001 - fallback de último nível
+        if _e_excecao_de_controle_streamlit(exc) or isinstance(
+            exc, (KeyboardInterrupt, SystemExit)
+        ):
+            raise
+        _exibir_erro_processamento(
+            "importar o processo judicial via PDF",
+            processo_id_selecionado,
+            None,
+            exc,
+        )
+        try:
+            st.info(
+                "A importação foi interrompida, mas nenhum dado do processo foi alterado. "
+                "Você pode continuar navegando pelo app e tentar novamente com menos arquivos."
+            )
+        except Exception:
+            logger.exception("Falha ao renderizar o fallback da importação judicial")
+        return False, p_atual, {}
+
+
+def _renderizar_tela_importacao_pdf(
     processo_id_selecionado: str,
     p_atual: Dict,
 ) -> Tuple[bool, Dict, Dict]:
@@ -333,9 +399,13 @@ def exibir_tela_importacao_pdf(
     st.markdown("#### ⏳ Processando...")
     
     # 1. Consolidar PDFs
+    texto_consolidado = None
     if revisao_pendente:
-        texto_consolidado = revisao_pendente["texto_consolidado"]
+        # O texto consolidado NÃO é mantido em st.session_state para evitar
+        # pressão de memória (OOM) no Streamlit Cloud durante os reruns.
         total_paginas = revisao_pendente["total_paginas"]
+        chamadas_previstas = revisao_pendente["num_chamadas_claude"]
+        permitido_chamadas, chamadas_ja_usadas = True, chamadas_hoje
     else:
         try:
             with st.spinner("📚 Consolidando PDFs..."):
@@ -348,62 +418,55 @@ def exibir_tela_importacao_pdf(
                 exc,
             )
             return False, p_atual, {}
-    
-    if not texto_consolidado:
-        st.error(
-            "❌ Não foi possível extrair texto legível dos PDFs enviados. "
-            "Verifique se os arquivos não estão corrompidos, protegidos ou apenas digitalizados sem OCR."
-        )
-        st.caption(
-            f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}. "
-            "Você pode reenviar somente os PDFs válidos ou gerar uma versão com texto pesquisável."
-        )
-        return False, p_atual, {}
 
-    threshold_conservador_pdf = int(config.get("cloud_conservative_pdf_count_threshold", 2))
-    threshold_conservador_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
-    modo_conservador = (
-        len(uploaded_files) >= threshold_conservador_pdf
-        or len(texto_consolidado) >= threshold_conservador_chars
-    )
-    if modo_conservador:
-        st.warning(
-            "⚠️ Para manter estabilidade no Streamlit Cloud, esta importação entrou automaticamente em modo "
-            "conservador (processamento em blocos menores)."
-        )
+        if not texto_consolidado:
+            st.error(
+                "❌ Não foi possível extrair texto legível dos PDFs enviados. "
+                "Verifique se os arquivos não estão corrompidos, protegidos ou apenas digitalizados sem OCR."
+            )
+            st.caption(
+                f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}. "
+                "Você pode reenviar somente os PDFs válidos ou gerar uma versão com texto pesquisável."
+            )
+            return False, p_atual, {}
 
-    try:
-        chamadas_previstas = (
-            revisao_pendente["num_chamadas_claude"]
-            if revisao_pendente
-            else estimar_chamadas_necessarias(
+        threshold_conservador_pdf = int(config.get("cloud_conservative_pdf_count_threshold", 2))
+        threshold_conservador_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
+        modo_conservador = (
+            len(uploaded_files) >= threshold_conservador_pdf
+            or len(texto_consolidado) >= threshold_conservador_chars
+        )
+        if modo_conservador:
+            st.warning(
+                "⚠️ Para manter estabilidade no Streamlit Cloud, esta importação entrou automaticamente em modo "
+                "conservador (processamento em blocos menores)."
+            )
+
+        try:
+            chamadas_previstas = estimar_chamadas_necessarias(
                 texto_consolidado,
                 modo_conservador=modo_conservador,
             )
-        )
-    except ValueError as exc:
-        logger.warning(
-            "Importação judicial não concluída | etapa=%s | processo=%s | arquivos=%s | erro=%s",
-            "estimar as chamadas da Claude",
-            processo_id_selecionado,
-            _resumir_arquivos(uploaded_files),
-            exc,
-        )
-        st.error(f"❌ {exc}")
-        st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
-        return False, p_atual, {}
-    except Exception as exc:
-        _exibir_erro_processamento(
-            "estimar as chamadas da Claude",
-            processo_id_selecionado,
-            uploaded_files,
-            exc,
-        )
-        return False, p_atual, {}
+        except ValueError as exc:
+            logger.warning(
+                "Importação judicial não concluída | etapa=%s | processo=%s | arquivos=%s | erro=%s",
+                "estimar as chamadas da Claude",
+                processo_id_selecionado,
+                _resumir_arquivos(uploaded_files),
+                exc,
+            )
+            st.error(f"❌ {exc}")
+            st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
+            return False, p_atual, {}
+        except Exception as exc:
+            _exibir_erro_processamento(
+                "estimar as chamadas da Claude",
+                processo_id_selecionado,
+                uploaded_files,
+                exc,
+            )
+            return False, p_atual, {}
 
-    if revisao_pendente:
-        permitido_chamadas, chamadas_ja_usadas, limite_chamadas = True, chamadas_hoje, limite_chamadas
-    else:
         try:
             permitido_chamadas, chamadas_ja_usadas, limite_chamadas = validar_limite_chamadas_claude(
                 chamadas_previstas
@@ -412,6 +475,11 @@ def exibir_tela_importacao_pdf(
             st.error(
                 "❌ Não foi possível confirmar o limite diário de chamadas. "
                 "A análise foi bloqueada para evitar ultrapassar a cota."
+            )
+            logger.exception(
+                "Falha ao validar limite de chamadas | processo=%s | arquivos=%s",
+                processo_id_selecionado,
+                _resumir_arquivos(uploaded_files),
             )
             return False, p_atual, {}
     st.info(
@@ -453,6 +521,9 @@ def exibir_tela_importacao_pdf(
                 exc,
             )
             return False, p_atual, {}
+        finally:
+            # Libera o texto consolidado assim que a análise termina.
+            texto_consolidado = None
     
     if not dados_extraidos or not isinstance(dados_extraidos, dict):
         logger.warning(
@@ -479,7 +550,6 @@ def exibir_tela_importacao_pdf(
     if not revisao_pendente:
         revisao_pendente = {
             "assinatura": assinatura_arquivos,
-            "texto_consolidado": texto_consolidado,
             "total_paginas": total_paginas,
             "dados_extraidos": dados_extraidos,
             "tokens_entrada": tokens_entrada,
@@ -586,8 +656,13 @@ def exibir_tela_importacao_pdf(
     
     with tab_raw:
         st.markdown("**JSON Bruto (Para Debug):**")
-        import json
-        st.json(dados_extraidos)
+        try:
+            st.json(dados_extraidos)
+        except Exception:
+            logger.exception(
+                "Falha ao renderizar o JSON bruto | processo=%s", processo_id_selecionado
+            )
+            st.warning("Não foi possível exibir o JSON bruto desta análise.")
     
     # ==================== ETAPA 6: CONFIRMAÇÃO ====================
     st.markdown("---")
