@@ -4,11 +4,12 @@ Suporta múltiplos PDFs consolidados em um único texto.
 """
 
 import logging
+import math
 from contextlib import contextmanager
 import os
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pdfplumber
 import streamlit as st
@@ -100,6 +101,10 @@ def _arquivo_pdf_temporario(arquivo, prefixo: str):
             pass
 
 
+def _bloco_pagina(num_pagina: int, texto_pagina: str) -> str:
+    return f"\n--- PÁGINA {num_pagina} ---\n{texto_pagina}\n"
+
+
 def extrair_texto_pdf(caminho_pdf: str, max_chars: Optional[int] = None) -> Tuple[str, int]:
     """
     Extrai texto completo de um arquivo PDF.
@@ -127,7 +132,7 @@ def extrair_texto_pdf(caminho_pdf: str, max_chars: Optional[int] = None) -> Tupl
                     # Libera o cache de objetos da página para limitar o uso de memória.
                     pagina.close()
                 if texto_pagina:
-                    bloco_pagina = f"\n--- PÁGINA {num_pagina} ---\n{texto_pagina}\n"
+                    bloco_pagina = _bloco_pagina(num_pagina, texto_pagina)
                     total_chars += len(bloco_pagina)
                     if max_chars is not None and total_chars > max_chars:
                         raise LimiteTextoPDFExcedido(mensagem_limite_chars_excedido(max_chars))
@@ -223,6 +228,275 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
             ) from e
 
     return "".join(partes_consolidadas), total_paginas
+
+
+def obter_max_lotes() -> int:
+    """Quantidade máxima de lotes da importação em lotes (padrão em APP_CONFIG_DEFAULTS)."""
+    padrao = int(APP_CONFIG_DEFAULTS["max_pdf_batches"])
+    try:
+        return max(int(obter_app_config().get("max_pdf_batches", padrao)), 1)
+    except (TypeError, ValueError):
+        logger.warning("Valor inválido para max_pdf_batches; usando o padrão %s.", padrao)
+        return padrao
+
+
+def _cabecalho_lote(idx: int, nome: str, pagina_inicio: int, pagina_fim: int, total_paginas: int) -> str:
+    # Mantém o marcador "ARQUIVO N:" reconhecido pelo divisor de chunks da Claude e
+    # informa o nome real do arquivo e as páginas originais para as 'fontes'.
+    return (
+        f"\n\n{'='*80}\nARQUIVO {idx}: {nome} "
+        f"(páginas {pagina_inicio} a {pagina_fim} de {total_paginas})\n{'='*80}\n\n"
+    )
+
+
+def descrever_lote(lote: Dict) -> str:
+    """Descrição curta dos arquivos/páginas de um lote (sem conteúdo textual)."""
+    partes = [
+        f"{parte.get('arquivo', 'arquivo_sem_nome')} (págs. {parte.get('pagina_inicio')}–{parte.get('pagina_fim')})"
+        for parte in lote.get("partes", [])
+    ]
+    return "; ".join(partes) if partes else "nenhum arquivo"
+
+
+def mensagem_limite_lotes_excedido(max_chars_lote: int, max_lotes: int) -> str:
+    return (
+        "Os PDFs enviados não cabem na importação em lotes: seriam necessários mais de "
+        f"{max_lotes} lote(s) de até {_formatar_inteiro(max_chars_lote)} caracteres "
+        "(max_pdf_batches x max_pdf_chars_total). Nenhum dado foi importado e o processo não foi "
+        "alterado. Remova peças desnecessárias ou gere PDFs apenas com as páginas relevantes."
+    )
+
+
+def _simular_chunk(estado: Tuple[int, int], tamanho: int, limite: int) -> Tuple[int, int]:
+    """
+    Replica o empacotamento sequencial de `core.ai_claude._dividir_texto_em_chunks`
+    (quebra em páginas/arquivos) usando apenas tamanhos. Estado: (chunks fechados,
+    caracteres no chunk atual). Superestimar tamanhos nunca reduz a contagem.
+    """
+    fechados, atual = estado
+    if tamanho > limite:
+        if atual > 0:
+            fechados += 1
+        return fechados + math.ceil(tamanho / limite), 0
+    if atual + tamanho > limite and atual > 0:
+        return fechados + 1, tamanho
+    return fechados, atual + tamanho
+
+
+def _total_chunks(estado: Tuple[int, int]) -> int:
+    fechados, atual = estado
+    return fechados + (1 if atual > 0 else 0)
+
+
+def planejar_lotes_pdf(
+    arquivos_pdf: List,
+    max_chars_lote: Optional[int] = None,
+    max_lotes: Optional[int] = None,
+    chunk_chars: Optional[int] = None,
+    max_chunks: Optional[int] = None,
+) -> List[Dict]:
+    """
+    Divide os PDFs em lotes sequenciais de intervalos de páginas, cada um com no máximo
+    `max_chars_lote` caracteres (mesma contagem usada na extração do lote) e, quando
+    `chunk_chars`/`max_chunks` são informados, no máximo `max_chunks` blocos de análise
+    da Claude (simulando a divisão real, que só quebra entre páginas).
+
+    Apenas o tamanho do texto de cada página é mantido; o texto é descartado logo após
+    a medição. Nunca trunca: uma página maior que o lote ou lotes acima de `max_lotes`
+    geram LimiteTextoPDFExcedido.
+
+    Returns:
+        Lista de lotes: {"indice", "partes": [{"arquivo_idx", "arquivo", "pagina_inicio",
+        "pagina_fim", "total_paginas_arquivo"}], "chars", "paginas", "chunks"}
+    """
+    max_chars_lote = obter_limite_chars_total() if max_chars_lote is None else int(max_chars_lote)
+    max_lotes = obter_max_lotes() if max_lotes is None else int(max_lotes)
+    simular = chunk_chars is not None and max_chunks is not None
+    limite_chunk = max(int(chunk_chars), 1) if simular else 0
+
+    def _estado_com(estado: Tuple[int, int], tamanhos: List[int]) -> Tuple[int, int]:
+        if not simular:
+            return estado
+        for tamanho in tamanhos:
+            estado = _simular_chunk(estado, tamanho, limite_chunk)
+        return estado
+
+    def _excede_chunks(estado: Tuple[int, int]) -> bool:
+        return simular and _total_chunks(estado) > int(max_chunks)
+    lotes: List[Dict] = []
+    atual: Optional[Dict] = None
+
+    for idx, arquivo in enumerate(arquivos_pdf, 1):
+        nome_arquivo = getattr(arquivo, "name", "arquivo_sem_nome")
+        chars_arquivo = 0
+        try:
+            with _arquivo_pdf_temporario(arquivo, f"temp_plano_lote_{idx}_") as temp_path:
+                with pdfplumber.open(temp_path) as pdf:
+                    total_paginas_arquivo = len(pdf.pages)
+                    if total_paginas_arquivo <= 0:
+                        raise ValueError(
+                            f"O arquivo '{nome_arquivo}' não pôde ser lido ou não possui páginas válidas. "
+                            "Remova-o ou envie uma versão íntegra do PDF; nenhum arquivo foi enviado à análise."
+                        )
+                    # Cabeçalho com o maior intervalo possível: o real nunca é maior.
+                    tamanho_cabecalho = len(
+                        _cabecalho_lote(
+                            idx, nome_arquivo, total_paginas_arquivo, total_paginas_arquivo, total_paginas_arquivo
+                        )
+                    )
+                    for num_pagina, pagina in enumerate(pdf.pages, 1):
+                        try:
+                            texto_pagina = pagina.extract_text()
+                        finally:
+                            pagina.close()
+                        if not texto_pagina:
+                            continue
+                        tamanho = len(_bloco_pagina(num_pagina, texto_pagina))
+                        del texto_pagina
+                        chars_arquivo += tamanho
+                        # O segmento da página pode carregar o "\n" inicial do próximo cabeçalho.
+                        segmento_pagina = tamanho + 1
+
+                        parte = None
+                        if atual and atual["partes"] and atual["partes"][-1]["arquivo_idx"] == idx:
+                            parte = atual["partes"][-1]
+                        custo = tamanho + (0 if parte else tamanho_cabecalho)
+                        novo_estado = None
+                        if atual is not None:
+                            novo_estado = _estado_com(
+                                atual["_chunks"],
+                                [segmento_pagina] if parte else [tamanho_cabecalho, segmento_pagina],
+                            )
+                        if (
+                            atual is None
+                            or atual["chars"] + custo > max_chars_lote
+                            or _excede_chunks(novo_estado)
+                        ):
+                            novo_estado = _estado_com((0, 0), [tamanho_cabecalho, segmento_pagina])
+                            if tamanho + tamanho_cabecalho > max_chars_lote or _excede_chunks(novo_estado):
+                                raise LimiteTextoPDFExcedido(
+                                    f"A página {num_pagina} do arquivo '{nome_arquivo}' sozinha ultrapassa o "
+                                    f"limite de {_formatar_inteiro(max_chars_lote)} caracteres por lote "
+                                    "(max_pdf_chars_total). Nenhum dado foi importado e o processo não foi alterado."
+                                )
+                            if len(lotes) >= max_lotes:
+                                raise LimiteTextoPDFExcedido(
+                                    mensagem_limite_lotes_excedido(max_chars_lote, max_lotes)
+                                )
+                            atual = {
+                                "indice": len(lotes) + 1,
+                                "partes": [],
+                                "chars": 0,
+                                "paginas": 0,
+                                "_chunks": (0, 0),
+                            }
+                            lotes.append(atual)
+                            parte = None
+                            custo = tamanho + tamanho_cabecalho
+                        if parte is None:
+                            parte = {
+                                "arquivo_idx": idx,
+                                "arquivo": nome_arquivo,
+                                "pagina_inicio": num_pagina,
+                                "pagina_fim": num_pagina,
+                                "total_paginas_arquivo": total_paginas_arquivo,
+                            }
+                            atual["partes"].append(parte)
+                        parte["pagina_fim"] = num_pagina
+                        atual["chars"] += custo
+                        atual["_chunks"] = novo_estado
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.exception("Erro ao planejar lotes do PDF %s", nome_arquivo)
+            raise ValueError(
+                f"Não foi possível processar o arquivo '{nome_arquivo}' ({type(exc).__name__}). "
+                "Nenhum dado foi importado; reenvie o arquivo ou substitua por uma versão íntegra do PDF."
+            ) from exc
+
+        if chars_arquivo == 0:
+            raise ValueError(
+                f"O arquivo '{nome_arquivo}' não possui texto legível para análise automática. "
+                "Gere uma versão com OCR antes de reenviar; nenhum arquivo foi enviado à análise."
+            )
+
+    for lote in lotes:
+        lote["paginas"] = sum(
+            parte["pagina_fim"] - parte["pagina_inicio"] + 1 for parte in lote["partes"]
+        )
+        estado_chunks = lote.pop("_chunks")
+        lote["chunks"] = max(_total_chunks(estado_chunks), 1) if simular else 1
+    return lotes
+
+
+def extrair_texto_lote(
+    arquivos_pdf: List,
+    lote: Dict,
+    max_chars: Optional[int] = None,
+) -> Tuple[str, int]:
+    """
+    Extrai somente as páginas de um lote planejado por `planejar_lotes_pdf`, com o nome
+    real do arquivo e a numeração original das páginas. Falha fechada se os arquivos
+    mudaram ou se o texto ultrapassar `max_chars` (sem truncar).
+    """
+    max_chars = obter_limite_chars_total() if max_chars is None else int(max_chars)
+    partes_texto: List[str] = []
+    total_chars = 0
+    total_paginas = 0
+
+    for parte in lote.get("partes", []):
+        idx = int(parte["arquivo_idx"])
+        nome_esperado = parte["arquivo"]
+        if idx < 1 or idx > len(arquivos_pdf):
+            raise ValueError(
+                f"O arquivo '{nome_esperado}' do lote {lote.get('indice')} não está mais entre os PDFs enviados."
+            )
+        arquivo = arquivos_pdf[idx - 1]
+        nome_arquivo = getattr(arquivo, "name", "arquivo_sem_nome")
+        if nome_arquivo != nome_esperado:
+            raise ValueError(
+                f"Os PDFs enviados foram alterados durante a importação em lotes ('{nome_esperado}')."
+            )
+        pagina_inicio = int(parte["pagina_inicio"])
+        pagina_fim = int(parte["pagina_fim"])
+        total_paginas_arquivo = int(parte["total_paginas_arquivo"])
+
+        cabecalho = _cabecalho_lote(idx, nome_arquivo, pagina_inicio, pagina_fim, total_paginas_arquivo)
+        total_chars += len(cabecalho)
+        partes_texto.append(cabecalho)
+        try:
+            with _arquivo_pdf_temporario(arquivo, f"temp_lote_{idx}_") as temp_path:
+                with pdfplumber.open(temp_path) as pdf:
+                    if len(pdf.pages) != total_paginas_arquivo:
+                        raise ValueError(
+                            f"O arquivo '{nome_arquivo}' foi alterado durante a importação em lotes."
+                        )
+                    for num_pagina in range(pagina_inicio, pagina_fim + 1):
+                        pagina = pdf.pages[num_pagina - 1]
+                        try:
+                            texto_pagina = pagina.extract_text()
+                        finally:
+                            pagina.close()
+                        if not texto_pagina:
+                            continue
+                        bloco = _bloco_pagina(num_pagina, texto_pagina)
+                        total_chars += len(bloco)
+                        if total_chars > max_chars:
+                            raise LimiteTextoPDFExcedido(
+                                mensagem_limite_chars_excedido(max_chars, nome_arquivo)
+                            )
+                        partes_texto.append(bloco)
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.exception("Erro ao extrair lote do PDF %s", nome_arquivo)
+            raise ValueError(
+                f"Não foi possível extrair as páginas {pagina_inicio}–{pagina_fim} de '{nome_arquivo}' "
+                f"({type(exc).__name__}). Nenhum dado foi importado."
+            ) from exc
+        total_paginas += pagina_fim - pagina_inicio + 1
+
+    return "".join(partes_texto), total_paginas
 
 
 def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:

@@ -188,7 +188,14 @@ class PdfProcessorTests(unittest.TestCase):
 
         exemplo = Path(__file__).resolve().parent.parent / ".streamlit" / "secrets.toml.example"
         app = tomllib.loads(exemplo.read_text(encoding="utf-8"))["app"]
-        for chave in ("max_pdf_pages_total", "max_pdf_chars_total", "claude_chunk_chars", "claude_max_chunks"):
+        for chave in (
+            "max_pdf_pages_total",
+            "max_pdf_chars_total",
+            "claude_chunk_chars",
+            "claude_max_chunks",
+            "pdf_batch_import_enabled",
+            "max_pdf_batches",
+        ):
             self.assertEqual(app[chave], APP_CONFIG_DEFAULTS[chave], chave)
 
     def test_limite_de_caracteres_continua_configuravel_por_secrets(self):
@@ -285,6 +292,161 @@ class PdfProcessorTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "PARTE_2.PDF"):
                 pdf_processor.consolidar_multiplos_pdfs(arquivos)
+
+    # ==================== IMPORTAÇÃO EM LOTES ====================
+
+    def test_planejar_lotes_divide_arquivo_grande_por_paginas_sem_truncar(self):
+        arquivos = [
+            DummyUpload("PARTE_1.PDF", b"%PDF-1.7"),
+            DummyUpload("PARTE_2.PDF", b"%PDF-1.7"),
+        ]
+        pdf_1 = self._pdf_falso(["A" * 400, "B" * 400, "", "C" * 400, "D" * 400])
+        pdf_2 = self._pdf_falso(["E" * 300])
+
+        with mock.patch.object(pdf_processor.pdfplumber, "open", side_effect=[pdf_1, pdf_2]):
+            lotes = pdf_processor.planejar_lotes_pdf(arquivos, max_chars_lote=1_200, max_lotes=4)
+
+        self.assertEqual(len(lotes), 3)
+        self.assertEqual([lote["indice"] for lote in lotes], [1, 2, 3])
+        for lote in lotes:
+            self.assertLessEqual(lote["chars"], 1_200)
+        self.assertEqual(
+            [(p["arquivo"], p["pagina_inicio"], p["pagina_fim"]) for p in lotes[0]["partes"]],
+            [("PARTE_1.PDF", 1, 2)],
+        )
+        self.assertEqual(
+            [(p["arquivo"], p["pagina_inicio"], p["pagina_fim"]) for p in lotes[1]["partes"]],
+            [("PARTE_1.PDF", 4, 5)],
+        )
+        self.assertEqual(
+            [(p["arquivo"], p["pagina_inicio"], p["pagina_fim"]) for p in lotes[2]["partes"]],
+            [("PARTE_2.PDF", 1, 1)],
+        )
+        for pdf in (pdf_1, pdf_2):
+            for pagina in pdf.pages:
+                pagina.close.assert_called_once()
+        # Somente metadados: nenhum texto de página fica no plano.
+        self.assertNotIn("AAAA", str(lotes))
+        self.assertEqual(
+            pdf_processor.descrever_lote(lotes[1]), "PARTE_1.PDF (págs. 4–5)"
+        )
+
+    def test_planejar_lotes_bloqueia_quando_excede_maximo_de_lotes(self):
+        arquivo = DummyUpload("PARTE_1.PDF", b"%PDF-1.7")
+        pdf = self._pdf_falso(["A" * 900, "B" * 900, "C" * 900])
+
+        with mock.patch.object(pdf_processor.pdfplumber, "open", return_value=pdf):
+            with self.assertRaises(pdf_processor.LimiteTextoPDFExcedido) as exc:
+                pdf_processor.planejar_lotes_pdf([arquivo], max_chars_lote=1_200, max_lotes=2)
+
+        self.assertIn("max_pdf_batches", str(exc.exception))
+        self.assertIn("processo não foi alterado", str(exc.exception))
+
+    def test_planejar_lotes_bloqueia_pagina_maior_que_o_lote(self):
+        arquivo = DummyUpload("PARTE_1.PDF", b"%PDF-1.7")
+        pdf = self._pdf_falso(["A" * 5_000])
+
+        with mock.patch.object(pdf_processor.pdfplumber, "open", return_value=pdf):
+            with self.assertRaisesRegex(pdf_processor.LimiteTextoPDFExcedido, "página 1 do arquivo 'PARTE_1.PDF'"):
+                pdf_processor.planejar_lotes_pdf([arquivo], max_chars_lote=1_200, max_lotes=4)
+
+    def test_planejar_lotes_bloqueia_pdf_sem_texto(self):
+        arquivo = DummyUpload("scan.pdf", b"%PDF-1.7")
+        pdf = self._pdf_falso(["", None])
+
+        with mock.patch.object(pdf_processor.pdfplumber, "open", return_value=pdf):
+            with self.assertRaisesRegex(ValueError, "scan.pdf"):
+                pdf_processor.planejar_lotes_pdf([arquivo], max_chars_lote=1_200, max_lotes=4)
+
+    def test_extrair_texto_lote_usa_paginas_originais_e_respeita_plano(self):
+        arquivos = [DummyUpload("PARTE_1.PDF", b"%PDF-1.7")]
+        textos = ["A" * 400, "B" * 400, "", "C" * 400, "D" * 400]
+        with mock.patch.object(pdf_processor.pdfplumber, "open", return_value=self._pdf_falso(textos)):
+            lotes = pdf_processor.planejar_lotes_pdf(arquivos, max_chars_lote=1_200, max_lotes=4)
+
+        pdf = self._pdf_falso(textos)
+        with mock.patch.object(pdf_processor.pdfplumber, "open", return_value=pdf):
+            texto, paginas = pdf_processor.extrair_texto_lote(arquivos, lotes[1], max_chars=1_200)
+
+        self.assertEqual(paginas, 2)
+        self.assertIn("ARQUIVO 1: PARTE_1.PDF (páginas 4 a 5 de 5)", texto)
+        self.assertIn("--- PÁGINA 4 ---", texto)
+        self.assertIn("--- PÁGINA 5 ---", texto)
+        self.assertNotIn("A" * 10, texto)
+        self.assertLessEqual(len(texto), lotes[1]["chars"])
+        pdf.pages[0].extract_text.assert_not_called()
+        pdf.pages[3].close.assert_called_once()
+
+    def test_extrair_texto_lote_falha_fechada_quando_arquivos_mudam(self):
+        lote = {
+            "indice": 1,
+            "partes": [{
+                "arquivo_idx": 1, "arquivo": "PARTE_1.PDF",
+                "pagina_inicio": 1, "pagina_fim": 1, "total_paginas_arquivo": 1,
+            }],
+            "chars": 100,
+        }
+
+        with self.assertRaisesRegex(ValueError, "alterados"):
+            pdf_processor.extrair_texto_lote([DummyUpload("OUTRO.PDF", b"%PDF-1.7")], lote, max_chars=1_000)
+
+    def test_extrair_texto_lote_nunca_trunca_acima_do_limite(self):
+        arquivos = [DummyUpload("PARTE_1.PDF", b"%PDF-1.7")]
+        lote = {
+            "indice": 1,
+            "partes": [{
+                "arquivo_idx": 1, "arquivo": "PARTE_1.PDF",
+                "pagina_inicio": 1, "pagina_fim": 2, "total_paginas_arquivo": 2,
+            }],
+            "chars": 900,
+        }
+
+        with mock.patch.object(pdf_processor.pdfplumber, "open", return_value=self._pdf_falso(["A" * 600, "B" * 600])):
+            with self.assertRaises(pdf_processor.LimiteTextoPDFExcedido):
+                pdf_processor.extrair_texto_lote(arquivos, lote, max_chars=1_000)
+
+    def test_lotes_cheios_com_limites_padrao_cabem_nos_chunks_reais_da_claude(self):
+        import random
+        from core import ai_claude
+        from core.config import APP_CONFIG_DEFAULTS
+
+        gerador = random.Random(42)
+        textos = ["x" * gerador.randint(2_000, 4_000) for _ in range(800)]  # ~2,4M caracteres
+        arquivos = [DummyUpload("PARTE_1.PDF", b"%PDF-1.7")]
+        config = dict(APP_CONFIG_DEFAULTS)
+
+        with (
+            mock.patch.object(ai_claude, "obter_app_config", return_value=config),
+            mock.patch.object(pdf_processor.pdfplumber, "open", side_effect=lambda *_: self._pdf_falso(textos)),
+        ):
+            chunk_chars, max_chunks = ai_claude.obter_parametros_chunk_lote()
+            lotes = pdf_processor.planejar_lotes_pdf(
+                arquivos,
+                max_chars_lote=config["max_pdf_chars_total"],
+                max_lotes=config["max_pdf_batches"],
+                chunk_chars=chunk_chars,
+                max_chunks=max_chunks,
+            )
+            self.assertGreater(len(lotes), 1)
+            for lote in lotes:
+                texto, _ = pdf_processor.extrair_texto_lote(
+                    arquivos, lote, max_chars=config["max_pdf_chars_total"]
+                )
+                self.assertLessEqual(len(texto), config["max_pdf_chars_total"])
+                self.assertLessEqual(lote["chunks"], max_chunks)
+                # Não pode lançar "blocos de análise acima do limite".
+                chamadas_reais = ai_claude.estimar_chamadas_necessarias(texto, modo_conservador=True)
+                self.assertLessEqual(chamadas_reais, ai_claude.chamadas_para_chunks(lote["chunks"]))
+
+    def test_padroes_de_lote_documentados(self):
+        from core.config import APP_CONFIG_DEFAULTS
+
+        self.assertTrue(APP_CONFIG_DEFAULTS["pdf_batch_import_enabled"])
+        self.assertEqual(APP_CONFIG_DEFAULTS["max_pdf_batches"], 4)
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_batches": "x"}):
+            self.assertEqual(pdf_processor.obter_max_lotes(), 4)
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_batches": 2}):
+            self.assertEqual(pdf_processor.obter_max_lotes(), 2)
 
 
 if __name__ == "__main__":
