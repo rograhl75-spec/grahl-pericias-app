@@ -25,6 +25,12 @@ APP_CONFIG_DEFAULTS = {
     "cloud_conservative_pdf_count_threshold": 2,
     "cloud_conservative_chars_threshold": 600_000,
     "claude_model": "claude-3-5-sonnet-20241022",
+    "claude_model_pricing": {
+        "claude-3-5-sonnet-20241022": {
+            "input_usd_per_million_tokens": 3.00,
+            "output_usd_per_million_tokens": 15.00,
+        }
+    },
     "cost_limit_per_day": 250.00,
     "usd_brl_exchange_rate": 5.00,
     "environment": "production",
@@ -81,6 +87,7 @@ _DADOS_PADRAO = {
     "doc_outros": "",
     "quadro_epis": [],
     "analise_epis_critica": "",
+    "conclusao_tecnica": "",
     "quesitos_juizo": "",
     "quesitos_autor": "",
     "quesitos_reu": "",
@@ -140,7 +147,10 @@ def _valor_placeholder(valor):
 def obter_app_config():
     config = copy.deepcopy(APP_CONFIG_DEFAULTS)
     try:
-        config.update(dict(st.secrets.get("app", {})))
+        configuracao_secrets = dict(st.secrets.get("app", {}))
+        precos_modelo = dict(configuracao_secrets.pop("claude_model_pricing", {}) or {})
+        config.update(configuracao_secrets)
+        config["claude_model_pricing"].update(precos_modelo)
     except Exception:
         pass
     return config

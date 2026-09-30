@@ -6,6 +6,7 @@ Fluxo completo: upload → validação → processamento → revisão → preenc
 import streamlit as st
 import logging
 import traceback
+import hashlib
 from typing import Dict, Tuple
 from core.pdf_processor import (
     validar_pdfs,
@@ -80,6 +81,18 @@ CAMPOS_IMPORTACAO_MAPEADOS = {
 def _resumir_arquivos(arquivos_pdf) -> str:
     nomes = [getattr(arquivo, "name", "arquivo_sem_nome") for arquivo in arquivos_pdf or []]
     return ", ".join(nomes) if nomes else "nenhum arquivo"
+
+
+def _assinatura_arquivos(arquivos_pdf) -> str:
+    digest = hashlib.sha256()
+    for arquivo in arquivos_pdf or []:
+        digest.update(arquivo.name.encode("utf-8", errors="replace"))
+        conteudo = arquivo.getvalue()
+        if isinstance(conteudo, (bytes, bytearray, memoryview)):
+            digest.update(conteudo)
+        else:
+            digest.update(str(getattr(arquivo, "size", 0)).encode("ascii"))
+    return digest.hexdigest()
 
 
 def _exibir_erro_processamento(
@@ -157,8 +170,17 @@ def exibir_tela_importacao_pdf(
     )
     
     if not uploaded_files:
+        st.session_state.pop(f"pdf_import_review::{processo_id_selecionado}", None)
         st.info(f"👉 Nenhum arquivo selecionado ainda. Faça upload de 1-{max_pdf_files} PDFs para começar.")
         return False, p_atual, {}
+
+    estado_key = f"pdf_import_review::{processo_id_selecionado}"
+    assinatura_arquivos = _assinatura_arquivos(uploaded_files)
+    revisao_pendente = st.session_state.get(estado_key)
+    if revisao_pendente and revisao_pendente.get("assinatura") != assinatura_arquivos:
+        st.session_state.pop(estado_key, None)
+        revisao_pendente = None
+        st.info("Os PDFs foram alterados; a análise anterior foi descartada.")
     
     # ==================== ETAPA 2: VALIDAÇÃO ====================
     st.markdown("#### ✅ Passo 2: Validar Arquivos")
@@ -184,6 +206,7 @@ def exibir_tela_importacao_pdf(
                 exc,
             )
             return False, p_atual, {}
+
         paginas_validas, mensagem_paginas = validar_limite_paginas(num_paginas)
         if not paginas_validas:
             if mensagem_paginas:
@@ -206,11 +229,28 @@ def exibir_tela_importacao_pdf(
     # ==================== ETAPA 3: ESTIMATIVA DE CUSTO ====================
     st.markdown("#### 💰 Passo 3: Estimativa de Custo")
     
-    custo_estimado = estimar_custo(num_paginas)
+    try:
+        custo_estimado = estimar_custo(num_paginas)
+    except Exception as exc:
+        st.error(f"Não foi possível estimar o custo para o modelo Claude configurado: {exc}")
+        return False, p_atual, {}
     taxa_cambio = obter_taxa_cambio_usd_brl()
     custo_estimado_brl = custo_estimado * taxa_cambio
     
-    custo_hoje = calcular_custo_hoje()
+    if revisao_pendente:
+        custo_hoje = 0.0
+        chamadas_hoje = 0
+    else:
+        try:
+            custo_hoje = calcular_custo_hoje()
+            chamadas_hoje = contar_chamadas_claude_hoje()
+        except Exception:
+            st.error(
+                "❌ Não foi possível confirmar os limites de uso com o banco. "
+                "A análise foi bloqueada para evitar ultrapassar o orçamento."
+            )
+            logger.exception("Falha ao validar limites diários da importação")
+            return False, p_atual, {}
     try:
         limite_diario = max(float(config.get("cost_limit_per_day", 250.00)), 0.0)
     except (TypeError, ValueError):
@@ -219,7 +259,6 @@ def exibir_tela_importacao_pdf(
         limite_chamadas = max(int(config.get("max_api_calls_per_day", 50)), 0)
     except (TypeError, ValueError):
         limite_chamadas = 50
-    chamadas_hoje = contar_chamadas_claude_hoje()
     
     col_custo1, col_custo2, col_custo3 = st.columns(3)
     
@@ -248,7 +287,17 @@ def exibir_tela_importacao_pdf(
         st.metric("✅ Chamadas Restantes", max(limite_chamadas - chamadas_hoje, 0))
     
     # Validar limite diário
-    permitido, custo_atual, limite = validar_limite_diario(custo_estimado_brl)
+    if revisao_pendente:
+        permitido, custo_atual, limite = True, custo_hoje, limite_diario
+    else:
+        try:
+            permitido, custo_atual, limite = validar_limite_diario(custo_estimado_brl)
+        except Exception:
+            st.error(
+                "❌ Não foi possível confirmar o limite diário de custo. "
+                "A análise foi bloqueada para evitar ultrapassar o orçamento."
+            )
+            return False, p_atual, {}
     if not permitido:
         st.error(
             "❌ Esta importação excede o limite diário de custo. "
@@ -276,7 +325,7 @@ def exibir_tela_importacao_pdf(
             st.info("Importação cancelada.")
             return False, p_atual, {}
     
-    if not btn_processar:
+    if not btn_processar and not revisao_pendente:
         return False, p_atual, {}
     
     # Processar os PDFs
@@ -284,17 +333,21 @@ def exibir_tela_importacao_pdf(
     st.markdown("#### ⏳ Processando...")
     
     # 1. Consolidar PDFs
-    try:
-        with st.spinner("📚 Consolidando PDFs..."):
-            texto_consolidado, total_paginas = consolidar_multiplos_pdfs(uploaded_files)
-    except Exception as exc:
-        _exibir_erro_processamento(
-            "consolidar os PDFs",
-            processo_id_selecionado,
-            uploaded_files,
-            exc,
-        )
-        return False, p_atual, {}
+    if revisao_pendente:
+        texto_consolidado = revisao_pendente["texto_consolidado"]
+        total_paginas = revisao_pendente["total_paginas"]
+    else:
+        try:
+            with st.spinner("📚 Consolidando PDFs..."):
+                texto_consolidado, total_paginas = consolidar_multiplos_pdfs(uploaded_files)
+        except Exception as exc:
+            _exibir_erro_processamento(
+                "consolidar os PDFs",
+                processo_id_selecionado,
+                uploaded_files,
+                exc,
+            )
+            return False, p_atual, {}
     
     if not texto_consolidado:
         st.error(
@@ -320,9 +373,13 @@ def exibir_tela_importacao_pdf(
         )
 
     try:
-        chamadas_previstas = estimar_chamadas_necessarias(
-            texto_consolidado,
-            modo_conservador=modo_conservador,
+        chamadas_previstas = (
+            revisao_pendente["num_chamadas_claude"]
+            if revisao_pendente
+            else estimar_chamadas_necessarias(
+                texto_consolidado,
+                modo_conservador=modo_conservador,
+            )
         )
     except ValueError as exc:
         logger.warning(
@@ -344,9 +401,19 @@ def exibir_tela_importacao_pdf(
         )
         return False, p_atual, {}
 
-    permitido_chamadas, chamadas_ja_usadas, limite_chamadas = validar_limite_chamadas_claude(
-        chamadas_previstas
-    )
+    if revisao_pendente:
+        permitido_chamadas, chamadas_ja_usadas, limite_chamadas = True, chamadas_hoje, limite_chamadas
+    else:
+        try:
+            permitido_chamadas, chamadas_ja_usadas, limite_chamadas = validar_limite_chamadas_claude(
+                chamadas_previstas
+            )
+        except Exception:
+            st.error(
+                "❌ Não foi possível confirmar o limite diário de chamadas. "
+                "A análise foi bloqueada para evitar ultrapassar a cota."
+            )
+            return False, p_atual, {}
     st.info(
         "Esta importação deve usar "
         f"{chamadas_previstas} chamada(s) da Claude "
@@ -364,20 +431,28 @@ def exibir_tela_importacao_pdf(
     
     # 2. Enviar para Claude
     st.markdown("---")
-    try:
-        dados_extraidos, tokens_entrada, tokens_saida, custo_real, num_chamadas_claude = analisar_processo_judicial(
-            texto_consolidado,
-            processo_id=processo_id_selecionado,
-            modo_conservador=modo_conservador,
-        )
-    except Exception as exc:
-        _exibir_erro_processamento(
-            "processar os PDFs com a Claude",
-            processo_id_selecionado,
-            uploaded_files,
-            exc,
-        )
-        return False, p_atual, {}
+    if revisao_pendente:
+        dados_extraidos = revisao_pendente["dados_extraidos"]
+        tokens_entrada = revisao_pendente["tokens_entrada"]
+        tokens_saida = revisao_pendente["tokens_saida"]
+        custo_real = revisao_pendente["custo_real"]
+        num_chamadas_claude = revisao_pendente["num_chamadas_claude"]
+    else:
+        try:
+            dados_extraidos, tokens_entrada, tokens_saida, custo_real, num_chamadas_claude = analisar_processo_judicial(
+                texto_consolidado,
+                processo_id=processo_id_selecionado,
+                modo_conservador=modo_conservador,
+                custo_estimado_brl=custo_estimado_brl,
+            )
+        except Exception as exc:
+            _exibir_erro_processamento(
+                "processar os PDFs com a Claude",
+                processo_id_selecionado,
+                uploaded_files,
+                exc,
+            )
+            return False, p_atual, {}
     
     if not dados_extraidos or not isinstance(dados_extraidos, dict):
         logger.warning(
@@ -400,6 +475,19 @@ def exibir_tela_importacao_pdf(
         )
         st.caption(f"Processo: {processo_id_selecionado} • Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
         return False, p_atual, {}
+
+    if not revisao_pendente:
+        revisao_pendente = {
+            "assinatura": assinatura_arquivos,
+            "texto_consolidado": texto_consolidado,
+            "total_paginas": total_paginas,
+            "dados_extraidos": dados_extraidos,
+            "tokens_entrada": tokens_entrada,
+            "tokens_saida": tokens_saida,
+            "custo_real": custo_real,
+            "num_chamadas_claude": num_chamadas_claude,
+        }
+        st.session_state[estado_key] = revisao_pendente
     
     custo_real_brl = custo_real * taxa_cambio
     
@@ -521,6 +609,7 @@ def exibir_tela_importacao_pdf(
         )
     
     if btn_descartar:
+        st.session_state.pop(estado_key, None)
         st.info("Dados descartados. Você pode fazer novo upload.")
         return False, p_atual, {}
     

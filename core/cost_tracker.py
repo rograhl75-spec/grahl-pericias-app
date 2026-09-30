@@ -6,7 +6,9 @@ Registra todas as requisições no Firebase para auditoria e relatórios.
 import streamlit as st
 import logging
 from datetime import datetime
+from uuid import uuid4
 from typing import Dict, List
+from firebase_admin import firestore
 
 try:
     from google.cloud.firestore_v1.base_query import FieldFilter
@@ -17,6 +19,10 @@ from core.config import obter_app_config, obter_taxa_cambio_usd_brl
 from core.database import _obter_db
 
 logger = logging.getLogger(__name__)
+
+
+class LimiteDiarioExcedido(ValueError):
+    """Limite de chamadas ou custo diário atingido."""
 
 
 def _normalizar_inteiro_nao_negativo(valor, padrao: int = 0) -> int:
@@ -119,6 +125,7 @@ def criar_registro_importacao_ia(
         "custo_brl": round(custo_brl, 2),
         "campos_completados": contar_campos_preenchidos(dados_extraidos),
         "confianca_extracao": calcular_confianca(dados_extraidos),
+        "fontes": dados_extraidos.get("fontes", {}),
         "num_chamadas_claude": num_chamadas_claude,
         "status": "sucesso",
     }
@@ -221,23 +228,46 @@ def calcular_custo_hoje() -> float:
         agora = datetime.now()
         inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
         
-        docs = _aplicar_filtro(
+        docs = list(_aplicar_filtro(
+            db.collection("claude_api_calls"),
+            "data_chamada",
+            ">=",
+            inicio_dia.isoformat(),
+        ).stream())
+
+        total_custo = 0.0
+        processos_com_chamadas_cobradas = set()
+        for doc in docs:
+            dados = doc.to_dict()
+            if dados.get("sucesso"):
+                detalhes = dados.get("detalhes", {})
+                if "custo_brl" in detalhes:
+                    total_custo += float(detalhes.get("custo_brl") or 0)
+                    processos_com_chamadas_cobradas.add(dados.get("processo_id"))
+
+        importacoes = _aplicar_filtro(
             db.collection("importacoes_ia"),
             "data_importacao",
             ">=",
             inicio_dia.isoformat(),
         ).stream()
-        
-        total_custo = 0.0
-        for doc in docs:
-            dados = doc.to_dict()
-            total_custo += dados.get("custo_brl", 0)
-        
+        total_custo += sum(
+            float((doc.to_dict() or {}).get("custo_brl", 0) or 0)
+            for doc in importacoes
+            if (doc.to_dict() or {}).get("processo_id") not in processos_com_chamadas_cobradas
+        )
+
+        reserva = db.collection("claude_usage_daily").document(agora.strftime("%Y-%m-%d")).get()
+        if reserva.exists:
+            total_custo = max(
+                total_custo,
+                _normalizar_float_nao_negativo((reserva.to_dict() or {}).get("custo_reservado_brl", 0)),
+            )
         return round(total_custo, 2)
         
     except Exception as e:
-        logger.error(f"Erro ao calcular custo de hoje: {e}")
-        return 0.0
+        logger.exception("Erro ao calcular custo de hoje")
+        raise RuntimeError("Não foi possível verificar o limite diário de custo.") from e
 
 
 def validar_limite_diario(custo_adicional_brl: float = 0.0) -> tuple:
@@ -259,12 +289,90 @@ def validar_limite_diario(custo_adicional_brl: float = 0.0) -> tuple:
     return (custo_hoje + custo_adicional_brl) <= limite, custo_hoje, limite
 
 
+def reservar_limites_claude(chamadas_previstas: int, custo_previsto_brl: float) -> str:
+    """Reserva quota diária em transação para impedir concorrência entre sessões."""
+    chamadas_previstas = _normalizar_inteiro_nao_negativo(chamadas_previstas)
+    custo_previsto_brl = _normalizar_float_nao_negativo(custo_previsto_brl)
+    if chamadas_previstas < 1:
+        raise ValueError("A reserva deve incluir ao menos uma chamada Claude.")
+
+    agora = datetime.now()
+    data = agora.strftime("%Y-%m-%d")
+    chamadas_base = contar_chamadas_claude_hoje()
+    custo_base = calcular_custo_hoje()
+    config = obter_app_config()
+    limite_chamadas = _normalizar_inteiro_nao_negativo(config.get("max_api_calls_per_day", 50), 50)
+    limite_custo = _normalizar_float_nao_negativo(config.get("cost_limit_per_day", 250.0), 250.0)
+    ref = _obter_db().collection("claude_usage_daily").document(data)
+    transaction = _obter_db().transaction()
+    reserva_id = uuid4().hex
+
+    @firestore.transactional
+    def _reservar(transaction, ref):
+        snapshot = ref.get(transaction=transaction)
+        usage = snapshot.to_dict() if snapshot.exists else {
+            "chamadas_reservadas": chamadas_base,
+            "custo_reservado_brl": custo_base,
+        }
+        chamadas_atual = _normalizar_inteiro_nao_negativo(usage.get("chamadas_reservadas", 0))
+        custo_atual = _normalizar_float_nao_negativo(usage.get("custo_reservado_brl", 0))
+        if chamadas_atual + chamadas_previstas > limite_chamadas:
+            raise LimiteDiarioExcedido(
+                f"Limite diário de chamadas Claude atingido (uso reservado: {chamadas_atual}, "
+                f"necessárias: {chamadas_previstas}, limite: {limite_chamadas})."
+            )
+        if custo_atual + custo_previsto_brl > limite_custo:
+            raise LimiteDiarioExcedido(
+                f"Limite diário de custo Claude atingido (reservado: R$ {custo_atual:.2f}, "
+                f"estimativa: R$ {custo_previsto_brl:.2f}, limite: R$ {limite_custo:.2f})."
+            )
+        transaction.set(ref, {
+            "data": data,
+            "chamadas_reservadas": chamadas_atual + chamadas_previstas,
+            "custo_reservado_brl": custo_atual + custo_previsto_brl,
+            "ultima_reserva": reserva_id,
+            "atualizado_em": agora.isoformat(),
+        }, merge=True)
+        return reserva_id
+
+    return _reservar(transaction, ref)
+
+
+def ajustar_reserva_claude(custo_previsto_brl: float, custo_real_brl: float) -> bool:
+    """Substitui a estimativa reservada pelo custo real após análise concluída."""
+    try:
+        ref = _obter_db().collection("claude_usage_daily").document(
+            datetime.now().strftime("%Y-%m-%d")
+        )
+        transaction = _obter_db().transaction()
+        custo_previsto_brl = _normalizar_float_nao_negativo(custo_previsto_brl)
+        custo_real_brl = _normalizar_float_nao_negativo(custo_real_brl)
+
+        @firestore.transactional
+        def _ajustar(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return
+            usage = snapshot.to_dict() or {}
+            custo_atual = _normalizar_float_nao_negativo(usage.get("custo_reservado_brl", 0))
+            transaction.set(ref, {
+                "custo_reservado_brl": max(custo_atual - custo_previsto_brl, 0) + custo_real_brl,
+                "atualizado_em": datetime.now().isoformat(),
+            }, merge=True)
+
+        _ajustar(transaction, ref)
+        return True
+    except Exception:
+        logger.exception("Não foi possível reconciliar a estimativa de custo Claude")
+        return False
+
+
 def registrar_chamada_claude(
     processo_id: str,
     etapa: str,
     sucesso: bool,
     detalhes: Dict | None = None,
-):
+) -> bool:
     """
     Registra uma chamada individual à API Claude (cada chunk ou consolidação
     conta como uma chamada). Usado para controlar o limite diário de
@@ -279,8 +387,10 @@ def registrar_chamada_claude(
             "detalhes": detalhes or {},
         }
         _obter_db().collection("claude_api_calls").add(registro)
+        return True
     except Exception as exc:
-        logger.warning("Não foi possível registrar chamada Claude: %s", exc)
+        logger.exception("Não foi possível registrar chamada Claude")
+        return False
 
 
 def contar_chamadas_claude_hoje() -> int:
@@ -294,10 +404,19 @@ def contar_chamadas_claude_hoje() -> int:
             ">=",
             inicio_dia.isoformat(),
         ).stream()
-        return sum(1 for _ in docs)
+        chamadas_registradas = sum(1 for _ in docs)
+        reserva = _obter_db().collection("claude_usage_daily").document(
+            agora.strftime("%Y-%m-%d")
+        ).get()
+        if not reserva.exists:
+            return chamadas_registradas
+        chamadas_reservadas = _normalizar_inteiro_nao_negativo(
+            (reserva.to_dict() or {}).get("chamadas_reservadas", 0)
+        )
+        return max(chamadas_registradas, chamadas_reservadas)
     except Exception as exc:
-        logger.error("Erro ao contar chamadas Claude de hoje: %s", exc)
-        return 0
+        logger.exception("Erro ao contar chamadas Claude de hoje")
+        raise RuntimeError("Não foi possível verificar o limite diário de chamadas.") from exc
 
 
 def validar_limite_chamadas_claude(chamadas_previstas: int = 1) -> tuple:
