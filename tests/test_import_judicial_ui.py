@@ -461,6 +461,7 @@ class ImportJudicialUiTests(unittest.TestCase):
     def test_limite_de_caracteres_na_extracao_bloqueia_sem_alterar_processo(self):
         streamlit, _ = self._streamlit_para_fluxo([True, False])
         config = self._config_padrao()
+        config["pdf_batch_import_enabled"] = False
         erro_limite = import_judicial_ui.LimiteTextoPDFExcedido(
             import_judicial_ui.mensagem_limite_chars_excedido(1_200_000, "PARTE_2.PDF")
         )
@@ -524,11 +525,319 @@ class ImportJudicialUiTests(unittest.TestCase):
         self.assertEqual(revisao["tamanho_texto"], len(texto))
         self.assertNotIn(texto, str(revisao))
 
+    # ==================== IMPORTAÇÃO EM LOTES ====================
+
+    def _arquivos_lotes(self):
+        arquivos = []
+        for nome in ("PARTE_1.PDF", "PARTE_2.PDF"):
+            arquivo = mock.Mock(name=nome)
+            arquivo.name = nome
+            arquivo.size = 1024
+            arquivo.getvalue.return_value = f"%PDF-1.7 {nome}".encode()
+            arquivos.append(arquivo)
+        return arquivos
+
+    def _lotes_planejados(self):
+        return [
+            {
+                "indice": 1,
+                "partes": [{
+                    "arquivo_idx": 1, "arquivo": "PARTE_1.PDF",
+                    "pagina_inicio": 1, "pagina_fim": 400, "total_paginas_arquivo": 700,
+                }],
+                "chars": 1_150_000,
+                "paginas": 400,
+            },
+            {
+                "indice": 2,
+                "partes": [
+                    {
+                        "arquivo_idx": 1, "arquivo": "PARTE_1.PDF",
+                        "pagina_inicio": 401, "pagina_fim": 700, "total_paginas_arquivo": 700,
+                    },
+                    {
+                        "arquivo_idx": 2, "arquivo": "PARTE_2.PDF",
+                        "pagina_inicio": 1, "pagina_fim": 120, "total_paginas_arquivo": 120,
+                    },
+                ],
+                "chars": 900_000,
+                "paginas": 420,
+            },
+        ]
+
+    def _streamlit_lotes(self, botoes, estado_lote=True):
+        streamlit = mock.Mock()
+        arquivos = self._arquivos_lotes()
+        streamlit.session_state = {}
+        if estado_lote:
+            streamlit.session_state["pdf_import_batch::Proc_01"] = {
+                "assinatura": import_judicial_ui._assinatura_arquivos(arquivos),
+                "status": "sugerido",
+            }
+        streamlit.file_uploader.return_value = arquivos
+        streamlit.columns.side_effect = self._mock_columns
+        streamlit.tabs.side_effect = self._mock_tabs
+        streamlit.button.side_effect = botoes
+        streamlit.spinner.return_value = self._streamlit_context()
+        streamlit.expander.return_value = self._streamlit_context()
+        return streamlit, arquivos
+
+    def _patches_lotes(self, **sobrescritas):
+        valores = {
+            "obter_app_config": mock.Mock(return_value=self._config_padrao()),
+            "validar_pdfs": mock.Mock(return_value=(True, "ok")),
+            "calcular_total_paginas": mock.Mock(return_value=820),
+            "validar_limite_paginas": mock.Mock(return_value=(True, "")),
+            "estimar_custo": mock.Mock(return_value=1.0),
+            "obter_taxa_cambio_usd_brl": mock.Mock(return_value=5.0),
+            "calcular_custo_hoje": mock.Mock(return_value=0.0),
+            "contar_chamadas_claude_hoje": mock.Mock(return_value=0),
+            "validar_limite_diario": mock.Mock(return_value=(True, 0.0, 250.0)),
+            "validar_limite_chamadas_claude": mock.Mock(return_value=(True, 0, 50)),
+            "obter_max_lotes": mock.Mock(return_value=4),
+            "planejar_lotes_pdf": mock.Mock(return_value=self._lotes_planejados()),
+            "extrair_texto_lote": mock.Mock(side_effect=[("X" * 5_000, 400), ("Y" * 5_000, 420)]),
+            "estimar_chamadas_por_tamanho": mock.Mock(return_value=16),
+            "estimar_chamadas_necessarias": mock.Mock(return_value=16),
+            "estimar_custo_texto_brl": mock.Mock(return_value=12.0),
+            "consolidar_multiplos_pdfs": mock.Mock(),
+            "analisar_processo_judicial": mock.Mock(),
+            "criar_registro_importacao_ia": mock.Mock(return_value={"status": "sucesso"}),
+        }
+        valores.update(sobrescritas)
+        return valores
+
+    def _executar_lotes(self, streamlit, mocks, processo=None):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(import_judicial_ui, "st", streamlit))
+            for nome, valor in mocks.items():
+                stack.enter_context(mock.patch.object(import_judicial_ui, nome, valor))
+            return import_judicial_ui.exibir_tela_importacao_pdf(
+                "Proc_01", processo if processo is not None else {"foo": "bar"}
+            )
+
+    def _dados_lote_1(self):
+        return {
+            "processo_num": "0001234-56.2024.5.09.0001",
+            "reclamante_nome": "Maria da Silva",
+            "agentes_alegados": "Ruído",
+            "fase_processual": "Conhecimento",
+            "quadro_epis": [{"descricao": "Protetor auricular", "ca": "123", "data_entrega": "", "obs": ""}],
+            "fontes": {
+                "processo_num": "PARTE_1.PDF, página 1",
+                "agentes_alegados": "PARTE_1.PDF, página 12",
+            },
+        }
+
+    def _dados_lote_2(self):
+        return {
+            "processo_num": "0001234-56.2024.5.09.0001",
+            "reclamante_nome": "[Não localizado nos documentos]",
+            "agentes_alegados": "Calor",
+            "fase_processual": "Aguardando perícia",
+            "quesitos_juizo": "1) Há insalubridade?",
+            "quadro_epis": [{"descricao": "Protetor auricular", "ca": "123", "data_entrega": "", "obs": ""}],
+            "fontes": {
+                "agentes_alegados": "PARTE_2.PDF, página 30",
+                "quesitos_juizo": "PARTE_2.PDF, página 88",
+            },
+        }
+
+    def test_texto_acima_do_limite_oferece_modo_lotes_sem_processar(self):
+        streamlit, _ = self._streamlit_lotes([True, False, False, False], estado_lote=False)
+        erro_limite = import_judicial_ui.LimiteTextoPDFExcedido(
+            import_judicial_ui.mensagem_limite_chars_excedido(1_200_000, "PARTE_1.PDF")
+        )
+        mocks = self._patches_lotes(consolidar_multiplos_pdfs=mock.Mock(side_effect=erro_limite))
+        processo_original = {"foo": "bar"}
+
+        sucesso, dados, registro = self._executar_lotes(streamlit, mocks, processo_original)
+
+        self.assertFalse(sucesso)
+        self.assertIs(dados, processo_original)
+        self.assertEqual(registro, {})
+        mocks["analisar_processo_judicial"].assert_not_called()
+        mocks["planejar_lotes_pdf"].assert_not_called()
+        estado = streamlit.session_state["pdf_import_batch::Proc_01"]
+        self.assertEqual(estado["status"], "sugerido")
+        self.assertNotIn("pdf_import_review::Proc_01", streamlit.session_state)
+        rotulos = [call.args[0] for call in streamlit.button.call_args_list]
+        self.assertIn("🧩 Processar em lotes", rotulos)
+        self.assertIn("🗑️ Descartar importação em lotes", rotulos)
+        avisos = " ".join(call.args[0] for call in streamlit.warning.call_args_list if call.args)
+        self.assertIn("lote", avisos)
+        self.assertIn("processo não foi alterado", avisos)
+
+    def test_lotes_multiplos_mesclados_ate_registro(self):
+        streamlit, _ = self._streamlit_lotes([False, False, True, False, True, False])
+        analisar = mock.Mock(side_effect=[
+            (self._dados_lote_1(), 1000, 200, 0.5, 16),
+            (self._dados_lote_2(), 900, 150, 0.4, 16),
+        ])
+        mocks = self._patches_lotes(analisar_processo_judicial=analisar)
+
+        sucesso, dados, registro = self._executar_lotes(streamlit, mocks, {"foo": "bar"})
+
+        self.assertTrue(sucesso)
+        self.assertEqual(analisar.call_count, 2)
+        for chamada in analisar.call_args_list:
+            self.assertEqual(chamada.kwargs["custo_estimado_brl"], 12.0)
+        mocks["consolidar_multiplos_pdfs"].assert_not_called()
+        self.assertEqual(dados["processo_num"], "0001234-56.2024.5.09.0001")
+        self.assertEqual(dados["reclamante_nome"], "Maria da Silva")
+        self.assertEqual(dados["agentes_alegados"], "Ruído\n\nCalor")
+        self.assertEqual(dados["fase_processual"], "Aguardando perícia")
+        self.assertEqual(dados["quesitos_juizo"], "1) Há insalubridade?")
+        self.assertEqual(len(dados["quadro_epis"]), 1)
+        self.assertEqual(registro["modo_importacao"], "lotes")
+        self.assertEqual(len(registro["lotes"]), 2)
+        self.assertIn("PARTE_2.PDF", registro["lotes"][1])
+        self.assertEqual(registro["campos_com_conflito_lotes"], ["fase_processual"])
+        criar = mocks["criar_registro_importacao_ia"]
+        kwargs = criar.call_args.kwargs
+        self.assertEqual(kwargs["num_chamadas_claude"], 32)
+        self.assertEqual(kwargs["tokens_entrada"], 1900)
+        self.assertAlmostEqual(kwargs["custo_real"], 0.9)
+        fontes = kwargs["dados_extraidos"]["fontes"]
+        self.assertIn("PARTE_1.PDF, página 12", fontes["agentes_alegados"])
+        self.assertIn("PARTE_2.PDF, página 30", fontes["agentes_alegados"])
+        self.assertIn("PARTE_2.PDF, página 88", fontes["quesitos_juizo"])
+        self.assertTrue(streamlit.progress.called)
+        self.assertNotIn("pdf_import_batch::Proc_01", streamlit.session_state)
+
+    def test_falha_em_lote_posterior_preserva_processo(self):
+        streamlit, _ = self._streamlit_lotes([False, False, True, False])
+        analisar = mock.Mock(side_effect=[
+            (self._dados_lote_1(), 1000, 200, 0.5, 16),
+            ({}, 0, 0, 0.0, 0),
+        ])
+        mocks = self._patches_lotes(analisar_processo_judicial=analisar)
+        processo_original = {"foo": "bar", "processo_num": "0001"}
+
+        sucesso, dados, registro = self._executar_lotes(streamlit, mocks, processo_original)
+
+        self.assertFalse(sucesso)
+        self.assertIs(dados, processo_original)
+        self.assertEqual(dados, {"foo": "bar", "processo_num": "0001"})
+        self.assertEqual(registro, {})
+        mocks["criar_registro_importacao_ia"].assert_not_called()
+        self.assertNotIn("pdf_import_review::Proc_01", streamlit.session_state)
+        estado = streamlit.session_state["pdf_import_batch::Proc_01"]
+        self.assertEqual(estado["status"], "falhou")
+        self.assertEqual(estado["erro"]["etapa"], "lote 2 de 2")
+        self.assertIn("PARTE_2.PDF", estado["erro"]["arquivos"])
+        self.assertNotIn("Maria da Silva", str(streamlit.session_state))
+        mensagens = " ".join(call.args[0] for call in streamlit.error.call_args_list if call.args)
+        self.assertIn("lote 2 de 2", mensagens)
+        self.assertIn("PARTE_2.PDF", mensagens)
+        self.assertIn("processo não foi alterado", mensagens)
+
+    def test_retentativa_apos_falha_e_descartar_limpa_estado(self):
+        streamlit, _ = self._streamlit_lotes([False, False, False, True])
+        streamlit.session_state["pdf_import_batch::Proc_01"].update({
+            "status": "falhou",
+            "erro": {"etapa": "lote 2 de 2", "arquivos": "PARTE_2.PDF (págs. 1–120)", "mensagem": "erro"},
+        })
+        mocks = self._patches_lotes()
+
+        sucesso, _, _ = self._executar_lotes(streamlit, mocks)
+
+        self.assertFalse(sucesso)
+        rotulos = [call.args[0] for call in streamlit.button.call_args_list]
+        self.assertIn("🔁 Tentar novamente em lotes", rotulos)
+        mensagens = " ".join(call.args[0] for call in streamlit.error.call_args_list if call.args)
+        self.assertIn("lote 2 de 2", mensagens)
+        self.assertNotIn("pdf_import_batch::Proc_01", streamlit.session_state)
+        mocks["planejar_lotes_pdf"].assert_not_called()
+        mocks["analisar_processo_judicial"].assert_not_called()
+
+    def test_cota_de_chamadas_insuficiente_para_todos_os_lotes_bloqueia_antes_de_extrair(self):
+        streamlit, _ = self._streamlit_lotes([False, False, True, False])
+        mocks = self._patches_lotes(
+            validar_limite_chamadas_claude=mock.Mock(return_value=(False, 30, 50)),
+        )
+
+        sucesso, dados, _ = self._executar_lotes(streamlit, mocks)
+
+        self.assertFalse(sucesso)
+        self.assertEqual(dados, {"foo": "bar"})
+        mocks["validar_limite_chamadas_claude"].assert_called_once_with(32)
+        mocks["extrair_texto_lote"].assert_not_called()
+        mocks["analisar_processo_judicial"].assert_not_called()
+        estado = streamlit.session_state["pdf_import_batch::Proc_01"]
+        self.assertEqual(estado["status"], "falhou")
+        self.assertIn("chamadas", estado["erro"]["mensagem"])
+
+    def test_cota_e_custo_validados_por_lote(self):
+        # Cota de chamadas esgotada antes do 2º lote.
+        streamlit, _ = self._streamlit_lotes([False, False, True, False])
+        mocks = self._patches_lotes(
+            validar_limite_chamadas_claude=mock.Mock(
+                side_effect=[(True, 0, 50), (True, 0, 50), (False, 40, 50)]
+            ),
+            analisar_processo_judicial=mock.Mock(return_value=(self._dados_lote_1(), 1, 1, 0.1, 16)),
+        )
+
+        sucesso, _, _ = self._executar_lotes(streamlit, mocks)
+
+        self.assertFalse(sucesso)
+        self.assertEqual(mocks["analisar_processo_judicial"].call_count, 1)
+        estado = streamlit.session_state["pdf_import_batch::Proc_01"]
+        self.assertEqual(estado["erro"]["etapa"], "lote 2 de 2")
+        self.assertIn("necessárias: 16", estado["erro"]["mensagem"])
+
+        # Custo diário esgotado antes do 2º lote (Passo 3, plano, lote 1, lote 2).
+        streamlit, _ = self._streamlit_lotes([False, False, True, False])
+        mocks = self._patches_lotes(
+            validar_limite_diario=mock.Mock(side_effect=[
+                (True, 0.0, 250.0), (True, 0.0, 250.0), (True, 0.0, 250.0), (False, 245.0, 250.0),
+            ]),
+            analisar_processo_judicial=mock.Mock(return_value=(self._dados_lote_1(), 1, 1, 0.1, 16)),
+        )
+
+        sucesso, _, registro = self._executar_lotes(streamlit, mocks)
+
+        self.assertFalse(sucesso)
+        self.assertEqual(registro, {})
+        self.assertEqual(mocks["analisar_processo_judicial"].call_count, 1)
+        mocks["validar_limite_diario"].assert_called_with(12.0)
+        estado = streamlit.session_state["pdf_import_batch::Proc_01"]
+        self.assertIn("custo", estado["erro"]["mensagem"])
+
+    def test_sessao_nao_guarda_texto_dos_lotes(self):
+        streamlit, _ = self._streamlit_lotes([False, False, True, False, False, False])
+        texto_1, texto_2 = "X" * 5_000, "Y" * 5_000
+        mocks = self._patches_lotes(
+            extrair_texto_lote=mock.Mock(side_effect=[(texto_1, 400), (texto_2, 420)]),
+            analisar_processo_judicial=mock.Mock(side_effect=[
+                (self._dados_lote_1(), 1000, 200, 0.5, 16),
+                (self._dados_lote_2(), 900, 150, 0.4, 16),
+            ]),
+        )
+
+        sucesso, _, _ = self._executar_lotes(streamlit, mocks)
+
+        self.assertFalse(sucesso)  # aguardando confirmação do usuário
+        revisao = streamlit.session_state["pdf_import_review::Proc_01"]
+        self.assertEqual(revisao["modo_importacao"], "lotes")
+        self.assertEqual(revisao["tamanho_texto"], 10_000)
+        conteudo_sessao = str(streamlit.session_state)
+        self.assertNotIn(texto_1, conteudo_sessao)
+        self.assertNotIn(texto_2, conteudo_sessao)
+        self.assertNotIn("XXXXXXXXXX", conteudo_sessao)
+        self.assertNotIn("texto_consolidado", revisao)
+
     def test_codigo_alterado_nao_usa_use_container_width(self):
         repo_root = Path(__file__).resolve().parents[1]
         for relative_path in ("app.py", "ui/import_judicial_ui.py"):
             source = (repo_root / relative_path).read_text(encoding="utf-8")
             self.assertNotIn("use_container_width", source, relative_path)
+
+    def test_fluxo_de_lotes_nao_usa_st_stop(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for relative_path in ("ui/import_judicial_ui.py", "core/batch_import.py", "core/pdf_processor.py"):
+            source = (repo_root / relative_path).read_text(encoding="utf-8")
+            self.assertNotIn("st.stop(", source, relative_path)
 
 
 if __name__ == "__main__":

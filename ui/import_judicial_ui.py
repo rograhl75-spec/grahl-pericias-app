@@ -7,7 +7,7 @@ import streamlit as st
 import logging
 import traceback
 import hashlib
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 from core.pdf_processor import (
     LimiteTextoPDFExcedido,
     mensagem_limite_chars_excedido,
@@ -15,8 +15,19 @@ from core.pdf_processor import (
     consolidar_multiplos_pdfs,
     calcular_total_paginas,
     validar_limite_paginas,
+    planejar_lotes_pdf,
+    extrair_texto_lote,
+    descrever_lote,
+    obter_max_lotes,
 )
-from core.ai_claude import analisar_processo_judicial, estimar_custo, estimar_chamadas_necessarias
+from core.ai_claude import (
+    analisar_processo_judicial,
+    estimar_custo,
+    estimar_chamadas_necessarias,
+    estimar_chamadas_por_tamanho,
+    estimar_custo_texto_brl,
+)
+from core.batch_import import consolidar_resultados_lotes
 from core.config import APP_CONFIG_DEFAULTS, obter_app_config, obter_taxa_cambio_usd_brl
 from core.cost_tracker import (
     criar_registro_importacao_ia,
@@ -268,6 +279,289 @@ def _renderizar_resultado_analise(
         st.json(dados_extraidos)
 
 
+def _formatar_inteiro(valor: int) -> str:
+    return f"{int(valor):,}".replace(",", ".")
+
+
+def _modo_lotes_habilitado(config: Dict) -> bool:
+    valor = config.get("pdf_batch_import_enabled", APP_CONFIG_DEFAULTS["pdf_batch_import_enabled"])
+    if isinstance(valor, str):
+        return valor.strip().lower() in {"1", "true", "sim", "yes", "on"}
+    return bool(valor)
+
+
+def _limite_chars_importacao(config: Dict) -> int:
+    padrao = int(APP_CONFIG_DEFAULTS["max_pdf_chars_total"])
+    try:
+        return max(int(config.get("max_pdf_chars_total", padrao)), 0)
+    except (TypeError, ValueError):
+        return padrao
+
+
+def _lote_em_modo_conservador(lote: Dict, config: Dict) -> bool:
+    try:
+        limiar_pdfs = int(config.get("cloud_conservative_pdf_count_threshold", 2))
+        limiar_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
+    except (TypeError, ValueError):
+        limiar_pdfs, limiar_chars = 2, 600_000
+    return len(lote.get("partes", [])) >= limiar_pdfs or int(lote.get("chars", 0)) >= limiar_chars
+
+
+def _renderizar_resumo_lotes(revisao: Dict) -> None:
+    lotes = revisao.get("lotes", [])
+    st.info(
+        f"🧩 Resultado consolidado de {len(lotes)} lote(s), sem chamada extra à Claude. "
+        "As fontes de cada campo indicam o lote de origem."
+    )
+    for lote in lotes:
+        st.caption(f"Lote {lote.get('indice')}: {lote.get('descricao', '')}")
+    conflitos = revisao.get("conflitos") or {}
+    if conflitos:
+        st.warning(
+            f"⚠️ {len(conflitos)} campo(s) com valores diferentes entre lotes. Foi mantido o valor do primeiro "
+            "lote (ou do último para fase processual e dados da vistoria); revise antes de confirmar."
+        )
+        with st.expander("Divergências entre lotes"):
+            for campo, valores in conflitos.items():
+                st.markdown(f"**{campo}**")
+                for valor in valores:
+                    st.write(f"- {valor}")
+
+
+def _exibir_fluxo_lotes(
+    processo_id: str,
+    uploaded_files,
+    assinatura_arquivos: str,
+    estado_lote: Dict,
+    config: Dict,
+) -> Optional[Dict]:
+    """
+    Painel da importação em lotes (opt-in). Retorna a revisão consolidada somente quando
+    todos os lotes forem concluídos; em qualquer outro caso retorna None.
+    """
+    lote_key = f"pdf_import_batch::{processo_id}"
+    max_chars_lote = _limite_chars_importacao(config)
+    max_lotes = obter_max_lotes()
+
+    st.markdown("#### 🧩 Importação em lotes")
+    st.warning(
+        f"O texto dos PDFs ultrapassa o limite de {_formatar_inteiro(max_chars_lote)} caracteres de uma "
+        "importação única. Nenhum dado foi importado e o processo não foi alterado. "
+        f"Você pode processar os PDFs em até {max_lotes} lote(s) sequenciais de até "
+        f"{_formatar_inteiro(max_chars_lote)} caracteres cada: cada lote é analisado separadamente pela Claude, "
+        "respeitando os limites diários de chamadas e de custo, e os resultados são mesclados para sua revisão. "
+        "O processo só é alterado depois que todos os lotes forem concluídos e você confirmar."
+    )
+
+    falhou = estado_lote.get("status") == "falhou"
+    erro = estado_lote.get("erro") or {}
+    if falhou and erro:
+        st.error(
+            f"❌ A importação em lotes falhou em {erro.get('etapa', 'etapa desconhecida')} "
+            f"({erro.get('arquivos', 'arquivos não identificados')}): {erro.get('mensagem', '')} "
+            "Nenhum dado foi importado e o processo não foi alterado."
+        )
+
+    col_lotes, col_descartar = st.columns(2)
+    with col_lotes:
+        btn_lotes = st.button(
+            "🔁 Tentar novamente em lotes" if falhou else "🧩 Processar em lotes",
+            type="primary",
+            width="stretch",
+            key=f"pdf_batch_run_{processo_id}",
+        )
+    with col_descartar:
+        btn_descartar = st.button(
+            "🗑️ Descartar importação em lotes",
+            width="stretch",
+            key=f"pdf_batch_discard_{processo_id}",
+        )
+
+    if btn_descartar:
+        st.session_state.pop(lote_key, None)
+        st.info("Importação em lotes descartada. Nenhum dado foi importado; você pode enviar outros PDFs.")
+        return None
+    if not btn_lotes:
+        return None
+    return _processar_em_lotes(processo_id, uploaded_files, assinatura_arquivos, config)
+
+
+def _processar_em_lotes(
+    processo_id: str,
+    uploaded_files,
+    assinatura_arquivos: str,
+    config: Dict,
+) -> Optional[Dict]:
+    """
+    Executa os lotes em sequência. Falha fechada: qualquer erro interrompe o fluxo,
+    descarta os resultados parciais e mantém o processo inalterado. O texto de cada
+    lote existe apenas durante a sua análise e nunca vai para st.session_state.
+    """
+    lote_key = f"pdf_import_batch::{processo_id}"
+    estado_key = f"pdf_import_review::{processo_id}"
+    max_chars_lote = _limite_chars_importacao(config)
+    arquivos_resumo = _resumir_arquivos(uploaded_files)
+
+    def _falhar(etapa: str, arquivos: str, erro) -> None:
+        mensagem = str(erro).strip() or type(erro).__name__
+        if len(mensagem) > 1000:
+            mensagem = mensagem[:999] + "…"
+        st.session_state[lote_key] = {
+            "assinatura": assinatura_arquivos,
+            "status": "falhou",
+            "erro": {"etapa": etapa, "arquivos": arquivos, "mensagem": mensagem},
+        }
+        logger.warning(
+            "Importação em lotes interrompida | processo=%s | etapa=%s | arquivos=%s | erro=%s",
+            processo_id,
+            etapa,
+            arquivos,
+            mensagem,
+        )
+        st.error(
+            f"❌ Importação em lotes interrompida em {etapa} ({arquivos}): {mensagem} "
+            "Nenhum dado foi importado e o processo não foi alterado. "
+            "Use “Tentar novamente em lotes” ou “Descartar importação em lotes”."
+        )
+        return None
+
+    try:
+        with st.spinner("📐 Planejando os lotes (medindo o texto de cada página)..."):
+            lotes = planejar_lotes_pdf(uploaded_files, max_chars_lote=max_chars_lote)
+    except Exception as exc:
+        return _falhar("planejar os lotes", arquivos_resumo, exc)
+
+    total_lotes = len(lotes)
+    try:
+        chamadas_por_lote = [
+            estimar_chamadas_por_tamanho(lote["chars"], _lote_em_modo_conservador(lote, config))
+            for lote in lotes
+        ]
+        custos_por_lote = [
+            estimar_custo_texto_brl(lote["chars"], chamadas)
+            for lote, chamadas in zip(lotes, chamadas_por_lote)
+        ]
+    except Exception as exc:
+        return _falhar("estimar chamadas e custo dos lotes", arquivos_resumo, exc)
+
+    total_chamadas = sum(chamadas_por_lote)
+    total_custo_brl = sum(custos_por_lote)
+    st.info(
+        f"Plano: {total_lotes} lote(s) • cerca de {total_chamadas} chamada(s) Claude • "
+        f"custo estimado R$ {total_custo_brl:.2f}. A mesclagem final é local, sem chamada extra."
+    )
+    for lote in lotes:
+        st.caption(
+            f"Lote {lote['indice']} de {total_lotes}: {descrever_lote(lote)} • "
+            f"{_formatar_inteiro(lote['chars'])} caracteres"
+        )
+
+    try:
+        permitido_chamadas, chamadas_hoje, limite_chamadas = validar_limite_chamadas_claude(total_chamadas)
+        permitido_custo, custo_hoje, limite_custo = validar_limite_diario(total_custo_brl)
+    except Exception as exc:
+        return _falhar("confirmar os limites diários", arquivos_resumo, exc)
+    if not permitido_chamadas:
+        return _falhar(
+            "confirmar os limites diários",
+            arquivos_resumo,
+            "Limite diário de chamadas Claude insuficiente para todos os lotes "
+            f"(hoje: {chamadas_hoje}, necessárias: ~{total_chamadas}, limite: {limite_chamadas}).",
+        )
+    if not permitido_custo:
+        return _falhar(
+            "confirmar os limites diários",
+            arquivos_resumo,
+            "Limite diário de custo insuficiente para todos os lotes "
+            f"(gasto: R$ {custo_hoje:.2f}, estimativa: R$ {total_custo_brl:.2f}, limite: R$ {limite_custo:.2f}).",
+        )
+
+    barra = st.progress(0.0, text=f"Lote 0 de {total_lotes} concluído")
+    resultados = []
+    tokens_entrada = tokens_saida = chamadas_realizadas = total_paginas = tamanho_total = 0
+    custo_real = 0.0
+    algum_conservador = False
+
+    for posicao, lote in enumerate(lotes, start=1):
+        etapa = f"lote {posicao} de {total_lotes}"
+        descricao = descrever_lote(lote)
+        barra.progress((posicao - 1) / total_lotes, text=f"Processando {etapa}: {descricao}")
+        texto_lote = ""
+        try:
+            with st.spinner(f"📚 Extraindo {etapa}: {descricao}"):
+                texto_lote, paginas_lote = extrair_texto_lote(uploaded_files, lote, max_chars=max_chars_lote)
+            if not texto_lote.strip():
+                raise ValueError("O lote não possui texto legível para análise.")
+            tamanho_lote = len(texto_lote)
+            modo_conservador = _lote_em_modo_conservador(lote, config)
+            chamadas_lote = estimar_chamadas_necessarias(texto_lote, modo_conservador=modo_conservador)
+            custo_lote_brl = estimar_custo_texto_brl(tamanho_lote, chamadas_lote)
+            permitido, hoje, limite = validar_limite_chamadas_claude(chamadas_lote)
+            if not permitido:
+                raise ValueError(
+                    "Limite diário de chamadas Claude atingido "
+                    f"(hoje: {hoje}, necessárias: {chamadas_lote}, limite: {limite})."
+                )
+            permitido, gasto, limite_valor = validar_limite_diario(custo_lote_brl)
+            if not permitido:
+                raise ValueError(
+                    "Limite diário de custo atingido "
+                    f"(gasto: R$ {gasto:.2f}, estimativa do lote: R$ {custo_lote_brl:.2f}, "
+                    f"limite: R$ {limite_valor:.2f})."
+                )
+            dados_lote, t_entrada, t_saida, custo_lote, n_chamadas = analisar_processo_judicial(
+                texto_lote,
+                processo_id=processo_id,
+                modo_conservador=modo_conservador,
+                custo_estimado_brl=custo_lote_brl,
+            )
+        except Exception as exc:
+            return _falhar(etapa, descricao, exc)
+        finally:
+            # Libera o texto do lote antes do próximo para limitar o uso de memória.
+            texto_lote = ""
+            del texto_lote
+
+        if not dados_lote or not isinstance(dados_lote, dict):
+            return _falhar(etapa, descricao, "A análise da Claude não retornou dados válidos para este lote.")
+
+        resultados.append(dados_lote)
+        tokens_entrada += int(t_entrada or 0)
+        tokens_saida += int(t_saida or 0)
+        custo_real += float(custo_lote or 0.0)
+        chamadas_realizadas += int(n_chamadas or 0)
+        total_paginas += int(paginas_lote or 0)
+        tamanho_total += tamanho_lote
+        algum_conservador = algum_conservador or modo_conservador
+        barra.progress(posicao / total_lotes, text=f"Lote {posicao} de {total_lotes} concluído: {descricao}")
+
+    try:
+        dados_consolidados, conflitos = consolidar_resultados_lotes(resultados, lotes)
+    except Exception as exc:
+        return _falhar("consolidar os resultados dos lotes", arquivos_resumo, exc)
+
+    revisao = {
+        "assinatura": assinatura_arquivos,
+        "tamanho_texto": tamanho_total,
+        "total_paginas": total_paginas,
+        "modo_conservador": algum_conservador,
+        "dados_extraidos": dados_consolidados,
+        "tokens_entrada": tokens_entrada,
+        "tokens_saida": tokens_saida,
+        "custo_real": custo_real,
+        "num_chamadas_claude": chamadas_realizadas,
+        "modo_importacao": "lotes",
+        "lotes": [
+            {"indice": lote["indice"], "descricao": descrever_lote(lote), "chars": lote["chars"]}
+            for lote in lotes
+        ],
+        "conflitos": conflitos,
+    }
+    st.session_state[estado_key] = revisao
+    st.session_state.pop(lote_key, None)
+    return revisao
+
+
 def exibir_tela_importacao_pdf(
     processo_id_selecionado: str,
     p_atual: Dict,
@@ -321,8 +615,10 @@ def _executar_tela_importacao_pdf(
         key=f"pdf_uploader_{processo_id_selecionado}"
     )
     
+    lote_key = f"pdf_import_batch::{processo_id_selecionado}"
     if not uploaded_files:
         st.session_state.pop(f"pdf_import_review::{processo_id_selecionado}", None)
+        st.session_state.pop(lote_key, None)
         st.info(f"👉 Nenhum arquivo selecionado ainda. Faça upload de 1-{max_pdf_files} PDFs para começar.")
         return False, p_atual, {}
 
@@ -333,6 +629,10 @@ def _executar_tela_importacao_pdf(
         st.session_state.pop(estado_key, None)
         revisao_pendente = None
         st.info("Os PDFs foram alterados; a análise anterior foi descartada.")
+    estado_lote = st.session_state.get(lote_key)
+    if estado_lote and estado_lote.get("assinatura") != assinatura_arquivos:
+        st.session_state.pop(lote_key, None)
+        estado_lote = None
     
     # ==================== ETAPA 2: VALIDAÇÃO ====================
     st.markdown("#### ✅ Passo 2: Validar Arquivos")
@@ -483,10 +783,26 @@ def _executar_tela_importacao_pdf(
     
     with col_btn_cancelar:
         if st.button("❌ Cancelar", width="stretch"):
+            st.session_state.pop(lote_key, None)
             st.info("Importação cancelada.")
             return False, p_atual, {}
-    
-    if not btn_processar and not revisao_pendente:
+
+    if btn_processar and estado_lote:
+        # Novo processamento único: a sugestão/falha anterior de lotes é descartada.
+        st.session_state.pop(lote_key, None)
+        estado_lote = None
+
+    if not revisao_pendente and estado_lote and not btn_processar:
+        revisao_pendente = _exibir_fluxo_lotes(
+            processo_id_selecionado,
+            uploaded_files,
+            assinatura_arquivos,
+            estado_lote,
+            config,
+        )
+        if not revisao_pendente:
+            return False, p_atual, {}
+    elif not btn_processar and not revisao_pendente:
         return False, p_atual, {}
     
     # Processar os PDFs
@@ -519,6 +835,17 @@ def _executar_tela_importacao_pdf(
             )
             st.error(f"❌ {exc}")
             st.caption(f"Processo: {processo_id_selecionado} • Arquivos: {_resumir_arquivos(uploaded_files)}")
+            if _modo_lotes_habilitado(config):
+                # Falha fechada: nada é processado até o usuário escolher o modo em lotes.
+                estado_lote = {"assinatura": assinatura_arquivos, "status": "sugerido"}
+                st.session_state[lote_key] = estado_lote
+                _exibir_fluxo_lotes(
+                    processo_id_selecionado,
+                    uploaded_files,
+                    assinatura_arquivos,
+                    estado_lote,
+                    config,
+                )
             return False, p_atual, {}
         except Exception as exc:
             _exibir_erro_processamento(
@@ -699,6 +1026,8 @@ def _executar_tela_importacao_pdf(
             tokens_entrada,
             tokens_saida,
         )
+        if revisao_pendente.get("modo_importacao") == "lotes":
+            _renderizar_resumo_lotes(revisao_pendente)
     except Exception as exc:
         _exibir_erro_processamento(
             "exibir os dados extraídos para revisão",
@@ -752,6 +1081,14 @@ def _executar_tela_importacao_pdf(
             dados_extraidos=dados_extraidos,
             num_chamadas_claude=num_chamadas_claude,
         )
+        if revisao_pendente.get("modo_importacao") == "lotes":
+            registro_importacao["modo_importacao"] = "lotes"
+            registro_importacao["lotes"] = [
+                lote.get("descricao", "") for lote in revisao_pendente.get("lotes", [])
+            ]
+            registro_importacao["campos_com_conflito_lotes"] = sorted(
+                revisao_pendente.get("conflitos", {})
+            )
     except Exception as exc:
         _exibir_erro_processamento(
             "preparar os dados para salvar no Firestore",

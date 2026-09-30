@@ -170,22 +170,25 @@ def _parsear_json_resposta(conteudo_resposta: str) -> Dict:
     raise ValueError("Resposta da IA não retornou JSON válido.")
 
 
+CAMPOS_TEXTO_EXTRACAO = (
+    "processo_num", "orgao_julgador", "data_autuacao", "valor_causa",
+    "rito_processual", "reclamante_nome", "reclamante_cpf", "reclamante_adv",
+    "reclamada_nome", "reclamada_cnpj", "reclamada_adv", "data_admissao",
+    "status_contrato", "periodo_imprescrito", "cargos", "setor",
+    "ultima_remuneracao", "objeto_pericia", "atividades_inicial",
+    "agentes_alegados", "pedidos_tecnicos", "preliminares_periciais",
+    "defesa_merito_sst", "fase_processual", "campo_data", "campo_horario",
+    "local_diligencia", "doc_ltcat", "doc_laudo", "doc_ppp", "doc_pgr",
+    "doc_os", "doc_asos", "doc_outros", "quesitos_juizo", "quesitos_autor",
+    "quesitos_reu", "relato_inicial", "profissao_cargo", "segurado_nascimento",
+    "apr_fisicos", "apr_quimicos", "apr_biologicos", "enquadramento_legal_prev",
+    "presentes_pericia", "campo_declaracoes_autor", "campo_declaracoes_reu",
+    "campo_medicoes",
+)
+
+
 def _validar_dados_extraidos(dados: Dict) -> Dict:
-    campos_texto = {
-        "processo_num", "orgao_julgador", "data_autuacao", "valor_causa",
-        "rito_processual", "reclamante_nome", "reclamante_cpf", "reclamante_adv",
-        "reclamada_nome", "reclamada_cnpj", "reclamada_adv", "data_admissao",
-        "status_contrato", "periodo_imprescrito", "cargos", "setor",
-        "ultima_remuneracao", "objeto_pericia", "atividades_inicial",
-        "agentes_alegados", "pedidos_tecnicos", "preliminares_periciais",
-        "defesa_merito_sst", "fase_processual", "campo_data", "campo_horario",
-        "local_diligencia", "doc_ltcat", "doc_laudo", "doc_ppp", "doc_pgr",
-        "doc_os", "doc_asos", "doc_outros", "quesitos_juizo", "quesitos_autor",
-        "quesitos_reu", "relato_inicial", "profissao_cargo", "segurado_nascimento",
-        "apr_fisicos", "apr_quimicos", "apr_biologicos", "enquadramento_legal_prev",
-        "presentes_pericia", "campo_declaracoes_autor", "campo_declaracoes_reu",
-        "campo_medicoes",
-    }
+    campos_texto = set(CAMPOS_TEXTO_EXTRACAO)
     normalizados = {}
     for campo in campos_texto:
         valor = dados.get(campo)
@@ -295,6 +298,14 @@ def _resolver_parametros_chunk(
     config: Dict,
     modo_conservador: bool = False,
 ) -> Tuple[int, int, bool]:
+    return _resolver_parametros_chunk_por_tamanho(len(texto_consolidado), config, modo_conservador)
+
+
+def _resolver_parametros_chunk_por_tamanho(
+    tamanho_texto: int,
+    config: Dict,
+    modo_conservador: bool = False,
+) -> Tuple[int, int, bool]:
     limite_padrao = int(config.get("claude_chunk_chars", 120_000))
     max_chunks_padrao = int(config.get("claude_max_chunks", 10))
     limite_conservador = int(config.get("claude_chunk_chars_conservative", 80_000))
@@ -302,17 +313,17 @@ def _resolver_parametros_chunk(
     limite_chars_cloud = int(config.get("cloud_conservative_chars_threshold", 600_000))
     pdf_count_threshold = int(config.get("cloud_conservative_pdf_count_threshold", 2))
 
-    precisa_conservador = modo_conservador or len(texto_consolidado) >= limite_chars_cloud
+    precisa_conservador = modo_conservador or tamanho_texto >= limite_chars_cloud
     if not precisa_conservador:
         return limite_padrao, max_chunks_padrao, False
 
     limite_escolhido = min(limite_padrao, limite_conservador)
-    chunks_minimos = max(1, math.ceil(len(texto_consolidado) / max(limite_escolhido, 1)))
+    chunks_minimos = max(1, math.ceil(tamanho_texto / max(limite_escolhido, 1)))
     max_chunks_escolhido = max(max_chunks_padrao, max_chunks_conservador, chunks_minimos)
 
     logger.warning(
         "Ativando processamento conservador de PDFs (texto=%s chars, limiar_chars=%s, limiar_pdfs=%s)",
-        len(texto_consolidado),
+        tamanho_texto,
         limite_chars_cloud,
         pdf_count_threshold,
     )
@@ -402,6 +413,32 @@ def estimar_chamadas_necessarias(texto_consolidado: str, modo_conservador: bool 
     return len(chunks) if len(chunks) == 1 else len(chunks) + 1
 
 
+def estimar_chamadas_por_tamanho(tamanho_texto: int, modo_conservador: bool = False) -> int:
+    """
+    Estimativa de chamadas Claude a partir apenas do tamanho do texto (sem mantê-lo em
+    memória), usada no planejamento da importação em lotes. A divisão real em chunks
+    respeita quebras de página e pode gerar alguns blocos a mais; por isso cada lote é
+    revalidado com `estimar_chamadas_necessarias` antes da chamada.
+    """
+    config = obter_app_config()
+    limite_chars, _, _ = _resolver_parametros_chunk_por_tamanho(
+        max(int(tamanho_texto), 0), config, modo_conservador
+    )
+    chunks = max(1, math.ceil(max(int(tamanho_texto), 1) / max(limite_chars, 1)))
+    return chunks if chunks == 1 else chunks + 1
+
+
+def estimar_custo_texto_brl(tamanho_texto: int, chamadas: int) -> float:
+    """Custo estimado (R$) de analisar um texto com `chamadas` chamadas Claude (margem de 20%)."""
+    config = obter_app_config()
+    model = config.get("claude_model", "claude-3-5-sonnet-20241022")
+    tokens_entrada_estimados = math.ceil(max(int(tamanho_texto), 0) / 3)
+    tokens_saida_estimados = 4096 * max(int(chamadas), 1)
+    return _calcular_custo_tokens(
+        model, tokens_entrada_estimados, tokens_saida_estimados
+    ) * float(config.get("usd_brl_exchange_rate", 5.0)) * 1.2
+
+
 def analisar_processo_judicial(
     texto_consolidado: str,
     processo_id: str = "processo_sem_id",
@@ -474,11 +511,7 @@ def analisar_processo_judicial(
             return {}, 0, 0, 0.0, 0
 
         if custo_estimado_brl is None:
-            tokens_entrada_estimados = math.ceil(len(texto_consolidado) / 3)
-            tokens_saida_estimados = 4096 * chamadas_previstas
-            custo_estimado_brl = _calcular_custo_tokens(
-                model, tokens_entrada_estimados, tokens_saida_estimados
-            ) * float(config.get("usd_brl_exchange_rate", 5.0)) * 1.2
+            custo_estimado_brl = estimar_custo_texto_brl(len(texto_consolidado), chamadas_previstas)
         custo_estimado_brl = float(custo_estimado_brl)
         reserva_id = reservar_limites_claude(chamadas_previstas, custo_estimado_brl)
         logger.info(

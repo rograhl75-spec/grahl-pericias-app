@@ -27,6 +27,11 @@ APP_CONFIG_DEFAULTS = {
     # falha de forma controlada, sem truncar nem importar parcialmente.
     "max_pdf_pages_total": 3000,
     "max_pdf_chars_total": 1_200_000,
+    # Importação em lotes (opt-in pelo usuário quando o texto passa de
+    # max_pdf_chars_total): cada lote respeita max_pdf_chars_total e é analisado
+    # separadamente; os resultados são mesclados de forma determinística.
+    "pdf_batch_import_enabled": True,
+    "max_pdf_batches": 4,
     "claude_chunk_chars": 120_000,
     "claude_max_chunks": 10,
     "claude_chunk_chars_conservative": 80_000,
