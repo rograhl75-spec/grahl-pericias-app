@@ -11,6 +11,19 @@ from core.config import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
+class FirebaseIndisponivelError(RuntimeError):
+    """Falha controlada de configuração/conexão do Firebase/Firestore.
+
+    Nunca interrompe o app (sem st.stop()): os chamadores capturam a exceção,
+    exibem mensagem amigável e seguem com retorno seguro. Exceções não são
+    armazenadas pelo st.cache_resource, então a conexão é re-tentada no
+    próximo rerun.
+    """
+
+
 @st.cache_resource
 def _obter_db():
     try:
@@ -21,19 +34,23 @@ def _obter_db():
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
         except ConfigurationError as exc:
-            st.error(f"Configuração do Firebase incompleta: {exc}")
-            st.stop()
-        except Exception:
-            logging.exception("Falha ao inicializar Firebase")
-            st.error("Erro ao conectar no Firebase. Verifique o st.secrets.")
-            st.stop()
+            logger.error("Configuração do Firebase incompleta: %s", exc)
+            raise FirebaseIndisponivelError(
+                f"Configuração do Firebase incompleta: {exc}"
+            ) from exc
+        except Exception as exc:
+            logger.exception("Falha ao inicializar Firebase")
+            raise FirebaseIndisponivelError(
+                "Erro ao conectar no Firebase. Verifique st.secrets['firebase']."
+            ) from exc
 
     try:
         return firestore.client()
     except Exception as exc:
-        logging.exception("Falha ao inicializar cliente Firestore")
-        st.error(f"Erro ao inicializar cliente Firestore: {exc}")
-        st.stop()
+        logger.exception("Falha ao inicializar cliente Firestore")
+        raise FirebaseIndisponivelError(
+            f"Erro ao inicializar cliente Firestore: {exc}"
+        ) from exc
 
 
 def carregar_dados():
@@ -48,7 +65,14 @@ def carregar_dados():
                     valor_doc[chave] = valor_padrao
             dados_db[doc.id] = valor_doc
         return dados_db
+    except FirebaseIndisponivelError as exc:
+        st.error(
+            f"⚠️ Banco de dados indisponível: {exc} "
+            "O app continua funcionando, mas os dados não serão carregados nem salvos na nuvem."
+        )
+        return {}
     except Exception as exc:
+        logger.exception("Falha ao carregar dados do Firestore")
         st.error(f"Erro ao carregar dados da nuvem: {exc}")
         return {}
 
@@ -99,6 +123,7 @@ def excluir_processo(id_proc):
     try:
         _obter_db().collection("processos").document(id_proc).delete()
     except Exception as exc:
+        logger.exception("Falha ao excluir processo %s", id_proc)
         st.error(f"Erro ao excluir na nuvem: {exc}")
 
 

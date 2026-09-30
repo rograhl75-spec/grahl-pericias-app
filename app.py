@@ -33,6 +33,10 @@ from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
 from ui.import_judicial_ui import exibir_tela_importacao_pdf
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
