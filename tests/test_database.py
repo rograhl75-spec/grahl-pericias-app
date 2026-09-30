@@ -87,6 +87,67 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(proc_id, "Proc_04")
 
+    def _limpar_cache_db(self):
+        database._obter_db.clear()
+        self.addCleanup(database._obter_db.clear)
+
+    def test_obter_db_config_ausente_levanta_erro_controlado_sem_st_stop(self):
+        self._limpar_cache_db()
+        with (
+            mock.patch.object(database.firebase_admin, "get_app", side_effect=ValueError),
+            mock.patch.object(
+                database,
+                "obter_credenciais_firebase",
+                side_effect=database.ConfigurationError("faltando private_key"),
+            ),
+            mock.patch.object(database.st, "stop") as st_stop,
+        ):
+            with self.assertRaises(database.FirebaseIndisponivelError):
+                database._obter_db()
+
+        st_stop.assert_not_called()
+
+    def test_obter_db_firestore_indisponivel_levanta_erro_controlado(self):
+        self._limpar_cache_db()
+        with (
+            mock.patch.object(database.firebase_admin, "get_app", return_value=object()),
+            mock.patch.object(database.firestore, "client", side_effect=RuntimeError("offline")),
+            mock.patch.object(database.st, "stop") as st_stop,
+        ):
+            with self.assertRaises(database.FirebaseIndisponivelError):
+                database._obter_db()
+
+        st_stop.assert_not_called()
+
+    def test_carregar_dados_com_firebase_indisponivel_retorna_vazio_e_exibe_erro(self):
+        with (
+            mock.patch.object(
+                database,
+                "_obter_db",
+                side_effect=database.FirebaseIndisponivelError("sem secrets"),
+            ),
+            mock.patch.object(database.st, "error") as st_error,
+            mock.patch.object(database.st, "stop") as st_stop,
+        ):
+            dados = database.carregar_dados()
+
+        self.assertEqual(dados, {})
+        st_error.assert_called_once()
+        st_stop.assert_not_called()
+
+    def test_salvar_processo_com_firebase_indisponivel_retorna_false(self):
+        with (
+            mock.patch.object(
+                database,
+                "_obter_db",
+                side_effect=database.FirebaseIndisponivelError("sem secrets"),
+            ),
+            mock.patch.object(database.st, "error") as st_error,
+        ):
+            self.assertFalse(database.salvar_processo("Proc_01", {}))
+
+        st_error.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
