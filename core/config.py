@@ -38,12 +38,18 @@ APP_CONFIG_DEFAULTS = {
     "claude_max_chunks_conservative": 15,
     "cloud_conservative_pdf_count_threshold": 2,
     "cloud_conservative_chars_threshold": 600_000,
-    "claude_model": "claude-3-5-sonnet-20241022",
+    # Modelo padrão ativo (evita 404 not_found_error por modelo depreciado).
+    "claude_model": "claude-sonnet-4-6",
     "claude_model_pricing": {
+        "claude-sonnet-4-6": {
+            "input_usd_per_million_tokens": 3.00,
+            "output_usd_per_million_tokens": 15.00,
+        },
+        # Compatibilidade com secrets legados que ainda usem o modelo antigo.
         "claude-3-5-sonnet-20241022": {
             "input_usd_per_million_tokens": 3.00,
             "output_usd_per_million_tokens": 15.00,
-        }
+        },
     },
     "cost_limit_per_day": 250.00,
     "usd_brl_exchange_rate": 5.00,
