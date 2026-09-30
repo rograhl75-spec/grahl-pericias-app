@@ -132,6 +132,47 @@ class AiClaudeTests(unittest.TestCase):
         ):
             ai_claude._calcular_custo_tokens("sonnet-test", 100, 100)
 
+    def test_calcular_custo_aceita_precos_em_mapping_do_streamlit_secrets(self):
+        from streamlit.runtime.secrets import AttrDict
+
+        config = {
+            "claude_model_pricing": AttrDict({
+                "claude-sonnet-4-6": AttrDict({
+                    "input_usd_per_million_tokens": 3.0,
+                    "output_usd_per_million_tokens": 15.0,
+                })
+            })
+        }
+        with mock.patch.object(ai_claude, "obter_app_config", return_value=config):
+            custo = ai_claude._calcular_custo_tokens("claude-sonnet-4-6", 1_000_000, 1_000_000)
+
+        self.assertEqual(custo, 18.0)
+
+    def test_estimar_custo_com_precos_lidos_de_st_secrets(self):
+        from streamlit.runtime.secrets import AttrDict
+
+        from core import config as core_config
+
+        secrets = AttrDict({
+            "app": {
+                "claude_model": "claude-sonnet-4-6",
+                "usd_brl_exchange_rate": 5.0,
+                "claude_model_pricing": {
+                    "claude-sonnet-4-6": {
+                        "input_usd_per_million_tokens": 3.0,
+                        "output_usd_per_million_tokens": 15.0,
+                    }
+                },
+            }
+        })
+        streamlit = mock.Mock(secrets=secrets)
+        with mock.patch.object(core_config, "st", streamlit):
+            precos = core_config.obter_app_config()["claude_model_pricing"]["claude-sonnet-4-6"]
+            self.assertNotIsInstance(precos, dict)
+            custo = ai_claude._calcular_custo_tokens("claude-sonnet-4-6", 1_000_000, 1_000_000)
+
+        self.assertEqual(custo, 18.0)
+
     def test_executar_chamada_claude_rejeita_resposta_sem_texto(self):
         cliente = mock.Mock()
         resposta = mock.Mock()
