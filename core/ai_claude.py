@@ -5,6 +5,7 @@ Responsável por enviar PDFs consolidados à IA e retornar dados estruturados.
 
 import json
 import logging
+from collections.abc import Mapping
 import math
 import re
 from typing import Dict, List, Tuple
@@ -235,8 +236,9 @@ def _validar_dados_extraidos(dados: Dict) -> Dict:
 
 def _calcular_custo_tokens(model: str, tokens_entrada: int, tokens_saida: int) -> float:
     config = obter_app_config()
-    precos = config.get("claude_model_pricing", {}).get(model)
-    if not isinstance(precos, dict):
+    tabela_precos = config.get("claude_model_pricing") or {}
+    precos = tabela_precos.get(model) if isinstance(tabela_precos, Mapping) else None
+    if not isinstance(precos, Mapping):
         raise ConfigurationError(
             f"Configure preços de entrada/saída para o modelo Claude '{model}' antes de usá-lo."
         )
