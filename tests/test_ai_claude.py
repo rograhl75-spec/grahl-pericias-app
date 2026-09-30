@@ -67,6 +67,7 @@ class AiClaudeTests(unittest.TestCase):
             "processo_num": 123,
             "reclamante_nome": None,
             "quadro_epis": [{"descricao": "Luva", "ca": 456}],
+            "fontes": {"processo_num": ["volume.pdf, página 2"], "campo_inexistente": "página 1"},
             "campo_nao_mapeado": "ignorado",
         })
 
@@ -77,6 +78,7 @@ class AiClaudeTests(unittest.TestCase):
             "data_entrega": "",
             "obs": "",
         }])
+        self.assertEqual(dados["fontes"], {"processo_num": "volume.pdf, página 2"})
         self.assertNotIn("campo_nao_mapeado", dados)
 
     def test_validar_dados_extraidos_rejeita_quadro_epis_malformado(self):

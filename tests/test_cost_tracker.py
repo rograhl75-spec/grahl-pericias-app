@@ -25,6 +25,19 @@ class CostTrackerTests(unittest.TestCase):
         self.assertEqual(registro["custo_brl"], 0.0)
         self.assertEqual(registro["num_chamadas_claude"], 3)
 
+    def test_registro_importacao_preserva_fontes_de_evidencia(self):
+        fontes = {"processo_num": "volume.pdf, página 2"}
+        registro = cost_tracker.criar_registro_importacao_ia(
+            processo_id="Proc_01",
+            nomes_arquivos=["volume.pdf"],
+            tokens_entrada=10,
+            tokens_saida=5,
+            custo_real=0.1,
+            dados_extraidos={"processo_num": "123", "fontes": fontes},
+        )
+
+        self.assertEqual(registro["fontes"], fontes)
+
     def test_validar_limite_chamadas_considera_chamadas_previstas(self):
         with (
             mock.patch.object(cost_tracker, "contar_chamadas_claude_hoje", return_value=48),

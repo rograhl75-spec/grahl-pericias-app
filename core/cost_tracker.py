@@ -125,6 +125,7 @@ def criar_registro_importacao_ia(
         "custo_brl": round(custo_brl, 2),
         "campos_completados": contar_campos_preenchidos(dados_extraidos),
         "confianca_extracao": calcular_confianca(dados_extraidos),
+        "fontes": dados_extraidos.get("fontes", {}),
         "num_chamadas_claude": num_chamadas_claude,
         "status": "sucesso",
     }
