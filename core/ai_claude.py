@@ -160,6 +160,72 @@ def _parsear_json_resposta(conteudo_resposta: str) -> Dict:
     raise ValueError("Resposta da IA não retornou JSON válido.")
 
 
+def _validar_dados_extraidos(dados: Dict) -> Dict:
+    campos_texto = {
+        "processo_num", "orgao_julgador", "data_autuacao", "valor_causa",
+        "rito_processual", "reclamante_nome", "reclamante_cpf", "reclamante_adv",
+        "reclamada_nome", "reclamada_cnpj", "reclamada_adv", "data_admissao",
+        "status_contrato", "periodo_imprescrito", "cargos", "setor",
+        "ultima_remuneracao", "objeto_pericia", "atividades_inicial",
+        "agentes_alegados", "pedidos_tecnicos", "preliminares_periciais",
+        "defesa_merito_sst", "fase_processual", "campo_data", "campo_horario",
+        "local_diligencia", "doc_ltcat", "doc_laudo", "doc_ppp", "doc_pgr",
+        "doc_os", "doc_asos", "doc_outros", "quesitos_juizo", "quesitos_autor",
+        "quesitos_reu", "relato_inicial", "profissao_cargo", "segurado_nascimento",
+        "apr_fisicos", "apr_quimicos", "apr_biologicos", "enquadramento_legal_prev",
+        "presentes_pericia", "campo_declaracoes_autor", "campo_declaracoes_reu",
+        "campo_medicoes",
+    }
+    normalizados = {}
+    for campo in campos_texto:
+        valor = dados.get(campo)
+        if valor is None:
+            continue
+        if isinstance(valor, (str, int, float, bool)):
+            normalizados[campo] = str(valor)
+        elif isinstance(valor, list):
+            normalizados[campo] = "\n".join(str(item) for item in valor if item is not None)
+        else:
+            raise ValueError(f"Formato inválido no campo '{campo}' retornado pela IA.")
+
+    quadro_epis = dados.get("quadro_epis", [])
+    if quadro_epis is not None:
+        if not isinstance(quadro_epis, list):
+            raise ValueError("Formato inválido para 'quadro_epis' retornado pela IA.")
+        normalizados["quadro_epis"] = []
+        for item in quadro_epis:
+            if not isinstance(item, dict):
+                raise ValueError("Item inválido na lista 'quadro_epis' retornada pela IA.")
+            normalizados["quadro_epis"].append({
+                campo: str(item.get(campo) or "")
+                for campo in ("descricao", "ca", "data_entrega", "obs")
+            })
+    return normalizados
+
+
+def _calcular_custo_tokens(model: str, tokens_entrada: int, tokens_saida: int) -> float:
+    config = obter_app_config()
+    modelos_conhecidos = {
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-sonnet-latest",
+        "claude-3-7-sonnet-latest",
+        "claude-sonnet-4-20250514",
+        "claude-sonnet-4-5",
+    }
+    if model not in modelos_conhecidos:
+        raise ConfigurationError(
+            f"Configure preços de entrada/saída para o modelo Claude '{model}' antes de usá-lo."
+        )
+    try:
+        preco_entrada = float(config["claude_input_usd_per_million_tokens"])
+        preco_saida = float(config["claude_output_usd_per_million_tokens"])
+        if preco_entrada < 0 or preco_saida < 0:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise ConfigurationError("Os preços de tokens Claude configurados são inválidos.")
+    return (tokens_entrada * preco_entrada + tokens_saida * preco_saida) / 1_000_000
+
+
 def _dividir_texto_em_chunks(texto: str, limite_chars: int, max_chunks: int) -> List[str]:
     if len(texto) <= limite_chars:
         return [texto]
@@ -256,11 +322,10 @@ def _executar_chamada_claude(
     usage = getattr(resposta, "usage", None)
     tokens_entrada = int(getattr(usage, "input_tokens", 0) or 0)
     tokens_saida = int(getattr(usage, "output_tokens", 0) or 0)
-    custo_input = (tokens_entrada / 1_000_000) * 3.00
-    custo_saida = (tokens_saida / 1_000_000) * 15.00
-    custo_real = custo_input + custo_saida
+    custo_real = _calcular_custo_tokens(model, tokens_entrada, tokens_saida)
+    custo_brl = custo_real * float(obter_app_config().get("usd_brl_exchange_rate", 5.0))
 
-    registrar_chamada_claude(
+    registrada = registrar_chamada_claude(
         processo_id=processo_id,
         etapa=etapa,
         sucesso=True,
@@ -268,8 +333,12 @@ def _executar_chamada_claude(
             "model": model,
             "tokens_entrada": tokens_entrada,
             "tokens_saida": tokens_saida,
+            "custo_usd": custo_real,
+            "custo_brl": custo_brl,
         },
     )
+    if not registrada:
+        raise RuntimeError("A chamada Claude foi concluída, mas o uso não pôde ser registrado no Firestore.")
 
     return "\n".join(partes_texto), tokens_entrada, tokens_saida, custo_real
 
@@ -397,7 +466,7 @@ def analisar_processo_judicial(
                 total_tokens_entrada += tokens_entrada
                 total_tokens_saida += tokens_saida
                 custo_total += custo_real
-                dados_extraidos = _parsear_json_resposta(conteudo_resposta)
+                dados_extraidos = _validar_dados_extraidos(_parsear_json_resposta(conteudo_resposta))
             else:
                 jsons_parciais = []
                 for indice, chunk in enumerate(chunks, start=1):
@@ -412,7 +481,7 @@ def analisar_processo_judicial(
                     total_tokens_entrada += tokens_entrada
                     total_tokens_saida += tokens_saida
                     custo_total += custo_real
-                    jsons_parciais.append(_parsear_json_resposta(conteudo_resposta))
+                    jsons_parciais.append(_validar_dados_extraidos(_parsear_json_resposta(conteudo_resposta)))
 
                 etapa = "consolidacao_final"
                 conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
@@ -425,7 +494,7 @@ def analisar_processo_judicial(
                 total_tokens_entrada += tokens_entrada
                 total_tokens_saida += tokens_saida
                 custo_total += custo_real
-                dados_extraidos = _parsear_json_resposta(conteudo_resposta)
+                dados_extraidos = _validar_dados_extraidos(_parsear_json_resposta(conteudo_resposta))
 
         logger.info(
             "Processo analisado com sucesso. Chamadas: %s, Tokens: %s, Custo: R$%.2f",
@@ -514,7 +583,5 @@ def estimar_custo(num_paginas: int) -> float:
     tokens_estimados_entrada = num_paginas * 250
     tokens_estimados_saida = 5000  # Média de resposta
     
-    custo_input = (tokens_estimados_entrada / 1_000_000) * 3.00
-    custo_saida = (tokens_estimados_saida / 1_000_000) * 15.00
-    
-    return custo_input + custo_saida
+    model = obter_app_config().get("claude_model", "claude-3-5-sonnet-20241022")
+    return _calcular_custo_tokens(model, tokens_estimados_entrada, tokens_estimados_saida)

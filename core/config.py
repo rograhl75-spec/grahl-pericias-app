@@ -25,6 +25,8 @@ APP_CONFIG_DEFAULTS = {
     "cloud_conservative_pdf_count_threshold": 2,
     "cloud_conservative_chars_threshold": 600_000,
     "claude_model": "claude-3-5-sonnet-20241022",
+    "claude_input_usd_per_million_tokens": 3.00,
+    "claude_output_usd_per_million_tokens": 15.00,
     "cost_limit_per_day": 250.00,
     "usd_brl_exchange_rate": 5.00,
     "environment": "production",

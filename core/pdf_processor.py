@@ -104,19 +104,17 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
 
             if num_paginas <= 0:
                 logger.warning("PDF ignorado por falha de leitura: %s", arquivo.name)
-                st.error(
-                    f"❌ O arquivo '{arquivo.name}' não pôde ser lido ou não possui páginas válidas. "
-                    "Remova-o ou envie uma versão íntegra do PDF."
+                raise ValueError(
+                    f"O arquivo '{arquivo.name}' não pôde ser lido ou não possui páginas válidas. "
+                    "Remova-o ou envie uma versão íntegra do PDF; nenhum arquivo foi enviado à análise."
                 )
-                continue
 
             if not texto.strip():
                 logger.warning("PDF ignorado por não conter texto extraível: %s", arquivo.name)
-                st.warning(
-                    f"⚠️ O arquivo '{arquivo.name}' não possui texto legível para análise automática. "
-                    "Se ele for digitalizado, gere um PDF com OCR antes de reenviar."
+                raise ValueError(
+                    f"O arquivo '{arquivo.name}' não possui texto legível para análise automática. "
+                    "Gere uma versão com OCR antes de reenviar; nenhum arquivo foi enviado à análise."
                 )
-                continue
 
             total_paginas += num_paginas
 
@@ -236,9 +234,11 @@ def calcular_total_paginas(arquivos_pdf: List) -> int:
                     total += len(pdf.pages)
                     encontrou_pdf_valido = True
         except Exception as exc:
-            st.error(f"❌ Não foi possível inspecionar '{arquivo.name}': {exc}")
             logger.exception("Falha ao calcular páginas do PDF %s", arquivo.name)
-            continue
+            raise ValueError(
+                f"Não foi possível inspecionar '{arquivo.name}': {exc}. "
+                "Corrija ou remova o arquivo antes de continuar."
+            ) from exc
 
     if not encontrou_pdf_valido:
         return -1

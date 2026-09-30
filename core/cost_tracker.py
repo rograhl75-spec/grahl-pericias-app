@@ -222,8 +222,8 @@ def calcular_custo_hoje() -> float:
         inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
         
         docs = _aplicar_filtro(
-            db.collection("importacoes_ia"),
-            "data_importacao",
+            db.collection("claude_api_calls"),
+            "data_chamada",
             ">=",
             inicio_dia.isoformat(),
         ).stream()
@@ -231,13 +231,14 @@ def calcular_custo_hoje() -> float:
         total_custo = 0.0
         for doc in docs:
             dados = doc.to_dict()
-            total_custo += dados.get("custo_brl", 0)
+            if dados.get("sucesso"):
+                total_custo += float(dados.get("detalhes", {}).get("custo_brl", 0) or 0)
         
         return round(total_custo, 2)
         
     except Exception as e:
-        logger.error(f"Erro ao calcular custo de hoje: {e}")
-        return 0.0
+        logger.exception("Erro ao calcular custo de hoje")
+        raise RuntimeError("Não foi possível verificar o limite diário de custo.") from e
 
 
 def validar_limite_diario(custo_adicional_brl: float = 0.0) -> tuple:
@@ -264,7 +265,7 @@ def registrar_chamada_claude(
     etapa: str,
     sucesso: bool,
     detalhes: Dict | None = None,
-):
+) -> bool:
     """
     Registra uma chamada individual à API Claude (cada chunk ou consolidação
     conta como uma chamada). Usado para controlar o limite diário de
@@ -279,8 +280,10 @@ def registrar_chamada_claude(
             "detalhes": detalhes or {},
         }
         _obter_db().collection("claude_api_calls").add(registro)
+        return True
     except Exception as exc:
-        logger.warning("Não foi possível registrar chamada Claude: %s", exc)
+        logger.exception("Não foi possível registrar chamada Claude")
+        return False
 
 
 def contar_chamadas_claude_hoje() -> int:
@@ -296,8 +299,8 @@ def contar_chamadas_claude_hoje() -> int:
         ).stream()
         return sum(1 for _ in docs)
     except Exception as exc:
-        logger.error("Erro ao contar chamadas Claude de hoje: %s", exc)
-        return 0
+        logger.exception("Erro ao contar chamadas Claude de hoje")
+        raise RuntimeError("Não foi possível verificar o limite diário de chamadas.") from exc
 
 
 def validar_limite_chamadas_claude(chamadas_previstas: int = 1) -> tuple:
