@@ -24,6 +24,10 @@ class FirebaseIndisponivelError(RuntimeError):
     """
 
 
+class ProcessoAlteradoError(RuntimeError):
+    """O processo mudou desde sua última leitura."""
+
+
 @st.cache_resource
 def _obter_db():
     try:
@@ -58,20 +62,27 @@ def carregar_dados():
         docs = _obter_db().collection("processos").stream()
         dados_padrao = criar_dados_padrao_persistencia()
         dados_db = {}
+        revisoes_sessao = st.session_state.setdefault("_process_revision_snapshot", {})
         for doc in docs:
             valor_doc = doc.to_dict() or {}
+            revisao_atual = int(valor_doc.get("_revision", 0) or 0)
+            revisao_esperada = revisoes_sessao.setdefault(doc.id, revisao_atual)
             for chave, valor_padrao in dados_padrao.items():
                 if chave not in valor_doc:
                     valor_doc[chave] = valor_padrao
+            valor_doc["_revision"] = revisao_esperada
             dados_db[doc.id] = valor_doc
+        st.session_state["firebase_load_error"] = ""
         return dados_db
     except FirebaseIndisponivelError as exc:
+        st.session_state["firebase_load_error"] = str(exc)
         st.error(
             f"⚠️ Banco de dados indisponível: {exc} "
             "O app continua funcionando, mas os dados não serão carregados nem salvos na nuvem."
         )
         return {}
     except Exception as exc:
+        st.session_state["firebase_load_error"] = str(exc)
         logger.exception("Falha ao carregar dados do Firestore")
         st.error(f"Erro ao carregar dados da nuvem: {exc}")
         return {}
@@ -89,11 +100,33 @@ def _normalizar_dados_processo(dados_proc):
 def salvar_processo(id_proc, dados_proc):
     try:
         dados_normalizados = _normalizar_dados_processo(dados_proc)
-        _obter_db().collection("processos").document(id_proc).set(dados_normalizados)
+        esperada = int(dados_proc.get("_revision", 0) or 0)
+        db = _obter_db()
+        ref = db.collection("processos").document(id_proc)
+        transaction = db.transaction()
+
+        @firestore.transactional
+        def _salvar(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            revisao_atual = int((snapshot.to_dict() or {}).get("_revision", 0) or 0) if snapshot.exists else 0
+            if revisao_atual != esperada:
+                raise ProcessoAlteradoError(
+                    "Este processo foi alterado por outro usuário desde que você o abriu. "
+                    "Recarregue os dados antes de salvar novamente."
+                )
+            dados_normalizados["_revision"] = esperada + 1
+            transaction.set(ref, dados_normalizados)
+            return esperada + 1
+
+        nova_revisao = _salvar(transaction, ref)
+        st.session_state.setdefault("_process_revision_snapshot", {})[id_proc] = nova_revisao
         return True
     except Exception as exc:
         logging.exception("Falha ao salvar processo %s", id_proc)
-        st.error(f"Erro Crítico de Rede: {exc}")
+        if isinstance(exc, ProcessoAlteradoError):
+            st.error(str(exc))
+        else:
+            st.error(f"Erro Crítico de Rede: {exc}")
         return False
 
 
@@ -103,19 +136,36 @@ def salvar_processo_com_importacao(id_proc, dados_proc, registro_importacao):
             raise ValueError("O registro de importação deve ser um dicionário.")
 
         dados_normalizados = _normalizar_dados_processo(dados_proc)
+        esperada = int(dados_proc.get("_revision", 0) or 0)
         db = _obter_db()
-        batch = db.batch()
+        transaction = db.transaction()
 
         processo_ref = db.collection("processos").document(id_proc)
         importacao_ref = db.collection("importacoes_ia").document()
 
-        batch.set(processo_ref, dados_normalizados)
-        batch.set(importacao_ref, registro_importacao)
-        batch.commit()
+        @firestore.transactional
+        def _salvar_importacao(transaction):
+            snapshot = processo_ref.get(transaction=transaction)
+            revisao_atual = int((snapshot.to_dict() or {}).get("_revision", 0) or 0) if snapshot.exists else 0
+            if revisao_atual != esperada:
+                raise ProcessoAlteradoError(
+                    "Este processo foi alterado por outro usuário durante a importação. "
+                    "Recarregue os dados e confirme a importação novamente."
+                )
+            dados_normalizados["_revision"] = esperada + 1
+            transaction.set(processo_ref, dados_normalizados)
+            transaction.set(importacao_ref, registro_importacao)
+            return esperada + 1
+
+        nova_revisao = _salvar_importacao(transaction)
+        st.session_state.setdefault("_process_revision_snapshot", {})[id_proc] = nova_revisao
         return True
     except Exception as exc:
         logging.exception("Falha ao salvar processo importado %s", id_proc)
-        st.error(f"Erro ao salvar processo importado: {exc}")
+        if isinstance(exc, ProcessoAlteradoError):
+            st.error(str(exc))
+        else:
+            st.error(f"Erro ao salvar processo importado: {exc}")
         return False
 
 

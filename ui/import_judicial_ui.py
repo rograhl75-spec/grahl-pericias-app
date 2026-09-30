@@ -87,7 +87,11 @@ def _assinatura_arquivos(arquivos_pdf) -> str:
     digest = hashlib.sha256()
     for arquivo in arquivos_pdf or []:
         digest.update(arquivo.name.encode("utf-8", errors="replace"))
-        digest.update(arquivo.getvalue())
+        conteudo = arquivo.getvalue()
+        if isinstance(conteudo, (bytes, bytearray, memoryview)):
+            digest.update(conteudo)
+        else:
+            digest.update(str(getattr(arquivo, "size", 0)).encode("ascii"))
     return digest.hexdigest()
 
 
@@ -203,18 +207,6 @@ def exibir_tela_importacao_pdf(
             )
             return False, p_atual, {}
 
-    if not revisao_pendente:
-            revisao_pendente = {
-                "assinatura": assinatura_arquivos,
-                "texto_consolidado": texto_consolidado,
-                "total_paginas": total_paginas,
-                "dados_extraidos": dados_extraidos,
-                "tokens_entrada": tokens_entrada,
-                "tokens_saida": tokens_saida,
-                "custo_real": custo_real,
-                "num_chamadas_claude": num_chamadas_claude,
-            }
-            st.session_state[estado_key] = revisao_pendente
         paginas_validas, mensagem_paginas = validar_limite_paginas(num_paginas)
         if not paginas_validas:
             if mensagem_paginas:
@@ -237,20 +229,28 @@ def exibir_tela_importacao_pdf(
     # ==================== ETAPA 3: ESTIMATIVA DE CUSTO ====================
     st.markdown("#### 💰 Passo 3: Estimativa de Custo")
     
-    custo_estimado = estimar_custo(num_paginas)
+    try:
+        custo_estimado = estimar_custo(num_paginas)
+    except Exception as exc:
+        st.error(f"Não foi possível estimar o custo para o modelo Claude configurado: {exc}")
+        return False, p_atual, {}
     taxa_cambio = obter_taxa_cambio_usd_brl()
     custo_estimado_brl = custo_estimado * taxa_cambio
     
-    try:
-        custo_hoje = calcular_custo_hoje()
-        chamadas_hoje = contar_chamadas_claude_hoje()
-    except Exception as exc:
-        st.error(
-            "❌ Não foi possível confirmar os limites de uso com o banco. "
-            "A análise foi bloqueada para evitar ultrapassar o orçamento."
-        )
-        logger.exception("Falha ao validar limites diários da importação")
-        return False, p_atual, {}
+    if revisao_pendente:
+        custo_hoje = 0.0
+        chamadas_hoje = 0
+    else:
+        try:
+            custo_hoje = calcular_custo_hoje()
+            chamadas_hoje = contar_chamadas_claude_hoje()
+        except Exception:
+            st.error(
+                "❌ Não foi possível confirmar os limites de uso com o banco. "
+                "A análise foi bloqueada para evitar ultrapassar o orçamento."
+            )
+            logger.exception("Falha ao validar limites diários da importação")
+            return False, p_atual, {}
     try:
         limite_diario = max(float(config.get("cost_limit_per_day", 250.00)), 0.0)
     except (TypeError, ValueError):
@@ -443,6 +443,7 @@ def exibir_tela_importacao_pdf(
                 texto_consolidado,
                 processo_id=processo_id_selecionado,
                 modo_conservador=modo_conservador,
+                custo_estimado_brl=custo_estimado_brl,
             )
         except Exception as exc:
             _exibir_erro_processamento(
@@ -474,6 +475,19 @@ def exibir_tela_importacao_pdf(
         )
         st.caption(f"Processo: {processo_id_selecionado} • Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
         return False, p_atual, {}
+
+    if not revisao_pendente:
+        revisao_pendente = {
+            "assinatura": assinatura_arquivos,
+            "texto_consolidado": texto_consolidado,
+            "total_paginas": total_paginas,
+            "dados_extraidos": dados_extraidos,
+            "tokens_entrada": tokens_entrada,
+            "tokens_saida": tokens_saida,
+            "custo_real": custo_real,
+            "num_chamadas_claude": num_chamadas_claude,
+        }
+        st.session_state[estado_key] = revisao_pendente
     
     custo_real_brl = custo_real * taxa_cambio
     
@@ -629,5 +643,4 @@ def exibir_tela_importacao_pdf(
         return False, p_atual, {}
 
     st.success(f"✅ Importação pronta para salvar! {campos_preenchidos} campos preenchidos automaticamente.")
-    st.session_state.pop(estado_key, None)
     return True, p_atual, registro_importacao

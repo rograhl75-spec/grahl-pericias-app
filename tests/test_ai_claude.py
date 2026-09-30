@@ -62,6 +62,48 @@ class AiClaudeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ai_claude._parsear_json_resposta("sem json válido aqui")
 
+    def test_validar_dados_extraidos_normaliza_tipos_e_epis(self):
+        dados = ai_claude._validar_dados_extraidos({
+            "processo_num": 123,
+            "reclamante_nome": None,
+            "quadro_epis": [{"descricao": "Luva", "ca": 456}],
+            "campo_nao_mapeado": "ignorado",
+        })
+
+        self.assertEqual(dados["processo_num"], "123")
+        self.assertEqual(dados["quadro_epis"], [{
+            "descricao": "Luva",
+            "ca": "456",
+            "data_entrega": "",
+            "obs": "",
+        }])
+        self.assertNotIn("campo_nao_mapeado", dados)
+
+    def test_validar_dados_extraidos_rejeita_quadro_epis_malformado(self):
+        with self.assertRaises(ValueError):
+            ai_claude._validar_dados_extraidos({"quadro_epis": ["luva"]})
+
+    def test_calcular_custo_usa_precos_especificos_do_modelo(self):
+        config = {
+            "claude_model_pricing": {
+                "sonnet-test": {
+                    "input_usd_per_million_tokens": 2.0,
+                    "output_usd_per_million_tokens": 7.0,
+                }
+            }
+        }
+        with mock.patch.object(ai_claude, "obter_app_config", return_value=config):
+            custo = ai_claude._calcular_custo_tokens("sonnet-test", 1_000_000, 1_000_000)
+
+        self.assertEqual(custo, 9.0)
+
+    def test_calcular_custo_rejeita_modelo_sem_precos(self):
+        with (
+            mock.patch.object(ai_claude, "obter_app_config", return_value={"claude_model_pricing": {}}),
+            self.assertRaises(ai_claude.ConfigurationError),
+        ):
+            ai_claude._calcular_custo_tokens("sonnet-test", 100, 100)
+
     def test_executar_chamada_claude_rejeita_resposta_sem_texto(self):
         cliente = mock.Mock()
         resposta = mock.Mock()
@@ -71,13 +113,14 @@ class AiClaudeTests(unittest.TestCase):
         cliente.messages.create.return_value = resposta
 
         with self.assertRaises(ValueError):
-            ai_claude._executar_chamada_claude(
-                cliente=cliente,
-                model="claude",
-                conteudo="prompt",
-                processo_id="Proc_01",
-                etapa="teste",
-            )
+            with mock.patch.object(ai_claude, "_calcular_custo_tokens", return_value=0.1):
+                ai_claude._executar_chamada_claude(
+                    cliente=cliente,
+                    model="claude",
+                    conteudo="prompt",
+                    processo_id="Proc_01",
+                    etapa="teste",
+                )
 
     def test_obter_cliente_sem_api_key_lanca_erro_controlado_sem_st_stop(self):
         streamlit = mock.Mock()
@@ -115,9 +158,22 @@ class AiClaudeTests(unittest.TestCase):
             mock.patch.object(
                 ai_claude,
                 "obter_app_config",
-                return_value={"claude_chunk_chars": 1000, "claude_max_chunks": 10},
+                return_value={
+                    "claude_chunk_chars": 1000,
+                    "claude_max_chunks": 10,
+                    "claude_model": "claude-3-5-sonnet-20241022",
+                    "claude_model_pricing": {
+                        "claude-3-5-sonnet-20241022": {
+                            "input_usd_per_million_tokens": 3.0,
+                            "output_usd_per_million_tokens": 15.0,
+                        }
+                    },
+                    "usd_brl_exchange_rate": 5.0,
+                },
             ),
+            mock.patch.object(ai_claude, "ajustar_reserva_claude", return_value=True),
             mock.patch.object(ai_claude, "validar_limite_chamadas_claude", return_value=(True, 0, 50)),
+            mock.patch.object(ai_claude, "reservar_limites_claude", return_value="reserva"),
             mock.patch.object(ai_claude, "registrar_chamada_claude") as registrar,
         ):
             resultado = ai_claude.analisar_processo_judicial("texto", processo_id="Proc_01")
@@ -187,7 +243,7 @@ class AiClaudeTests(unittest.TestCase):
 
         (dados, entrada, saida, _, chamadas), streamlit, _ = self._analisar_com_cliente(cliente=cliente)
 
-        self.assertEqual(dados, {"processo_num": "123"})
+        self.assertEqual(dados, {"processo_num": "123", "quadro_epis": []})
         self.assertEqual((entrada, saida, chamadas), (10, 5, 1))
         streamlit.error.assert_not_called()
 

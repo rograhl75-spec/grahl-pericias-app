@@ -48,6 +48,50 @@ def _set_field_widget_value(field_config: dict, processo_id: str, value: str) ->
     st.session_state[_field_widget_key(field_config, processo_id)] = value
 
 
+def _normalizar_dados_documento(dados: dict) -> tuple[dict, list[str]]:
+    documento = dict(dados)
+    campos_texto = {
+        "modulo_atuacao", "papel_profissional", "reclamante_nome", "reclamante_cpf",
+        "segurado_nascimento", "profissao_cargo", "reclamada_nome", "reclamada_cnpj",
+        "setor", "data_admissao", "relato_inicial", "apr_fisicos", "apr_quimicos",
+        "apr_biologicos", "enquadramento_legal_prev", "doc_ltcat", "conclusao_tecnica",
+        "extemp_justificativa", "analise_epis_critica", "processo_num", "orgao_julgador",
+        "data_autuacao", "valor_causa", "rito_processual", "reclamante_adv",
+        "reclamada_adv", "status_contrato", "periodo_imprescrito", "cargos",
+        "ultima_remuneracao", "objeto_pericia", "atividades_inicial", "agentes_alegados",
+        "pedidos_tecnicos", "preliminares_periciais", "defesa_merito_sst",
+        "fase_processual", "campo_data", "campo_horario", "local_diligencia",
+        "doc_laudo", "doc_ppp", "doc_pgr", "doc_os", "doc_asos", "doc_outros",
+        "quesitos_juizo", "quesitos_autor", "quesitos_reu", "presentes_pericia",
+        "campo_declaracoes_autor", "campo_declaracoes_reu", "campo_medicoes",
+    }
+    for campo in campos_texto:
+        valor = documento.get(campo, "")
+        if valor is None:
+            documento[campo] = ""
+        elif isinstance(valor, (str, int, float, bool)):
+            documento[campo] = str(valor)
+        else:
+            return documento, [f"O campo '{campo}' contém um formato incompatível."]
+
+    erros = []
+    epis = documento.get("quadro_epis", [])
+    if not isinstance(epis, list) or any(not isinstance(item, dict) for item in epis):
+        erros.append("A tabela de EPIs possui estrutura inválida.")
+    else:
+        documento["quadro_epis"] = [
+            {campo: str(item.get(campo) or "") for campo in ("descricao", "ca", "data_entrega", "obs")}
+            for item in epis
+        ]
+    fotos = documento.get("campo_fotos", [])
+    if not isinstance(fotos, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("base64", ""), str)
+        for item in fotos
+    ):
+        erros.append("A lista de fotos possui estrutura inválida.")
+    return documento, erros
+
+
 def render_field_error(message: str | None) -> None:
     if message:
         st.markdown(
@@ -105,7 +149,7 @@ def render_field_draft_support(processo_id: str) -> None:
             }}
         </style>
         <div class="campo-draft-status-wrap">
-            <div id="campo_draft_status" class="campo-draft-status">Rascunho local automático ativo neste navegador.</div>
+            <div id="campo_draft_status" class="campo-draft-status">Rascunho somente local: ainda não sincronizado com a nuvem.</div>
             <button id="campo_draft_clear" type="button" class="campo-draft-clear">Limpar rascunho local</button>
         </div>
         <script>
@@ -161,7 +205,7 @@ def render_field_draft_support(processo_id: str) -> None:
                     const snapshot = captureValues();
                     if (!snapshot.hasContent) {{
                         window.parent.localStorage.removeItem(storageKey);
-                        setStatus("Rascunho local automático ativo neste navegador.", "#334155");
+                        setStatus("Rascunho somente local: ainda não sincronizado com a nuvem.", "#334155");
                         return;
                     }}
 
@@ -169,8 +213,12 @@ def render_field_draft_support(processo_id: str) -> None:
                         values: snapshot.values,
                         updatedAt: new Date().toISOString(),
                     }};
-                    window.parent.localStorage.setItem(storageKey, JSON.stringify(payload));
-                    setStatus("Rascunho local salvo automaticamente neste navegador.", "#166534");
+                    try {{
+                        window.parent.localStorage.setItem(storageKey, JSON.stringify(payload));
+                        setStatus("Rascunho somente local salvo; use Salvar para sincronizar com a nuvem.", "#166534");
+                    }} catch (error) {{
+                        setStatus("Não foi possível salvar o rascunho neste navegador.", "#b91c1c");
+                    }}
                 }}
 
                 function restoreDraft() {{
@@ -184,6 +232,12 @@ def render_field_draft_support(processo_id: str) -> None:
                         payload = JSON.parse(raw);
                     }} catch (error) {{
                         window.parent.localStorage.removeItem(storageKey);
+                        return;
+                    }}
+                    const updatedAtMs = Date.parse(payload?.updatedAt || "");
+                    if (!Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > 7 * 24 * 60 * 60 * 1000) {{
+                        window.parent.localStorage.removeItem(storageKey);
+                        setStatus("Rascunho local expirado (retenção de 7 dias) e removido.", "#b45309");
                         return;
                     }}
 
@@ -620,6 +674,11 @@ if "campo_valores_memorizados" not in st.session_state: st.session_state.campo_v
 aplicar_estilos()
 
 db_processos = carregar_dados()
+if st.session_state.get("firebase_load_error"):
+    st.error(
+        "Os dados existentes não foram carregados. Não crie nem edite casos até que a conexão "
+        "com o banco seja restaurada; nenhuma cópia local substitui os dados da nuvem."
+    )
 
 col_logo, col_titulo = st.columns([1, 6])
 with col_logo:
@@ -844,6 +903,7 @@ elif opcao == "📥 Importar Processo (PDF)":
                 "Use esta opção somente se os PDFs pertencem a este mesmo processo."
             )
 
+    chave_revisao_importacao = f"pdf_import_review::{processo_importacao_id}"
     importado_com_sucesso, dados_importados, registro_importacao = exibir_tela_importacao_pdf(
         processo_importacao_id,
         p_importacao,
@@ -854,6 +914,7 @@ elif opcao == "📥 Importar Processo (PDF)":
             processo_importacao_id = gerar_proximo_id(db_processos)
             registro_importacao["processo_id"] = processo_importacao_id
         if salvar_processo_com_importacao(processo_importacao_id, dados_importados, registro_importacao):
+            st.session_state.pop(chave_revisao_importacao, None)
             st.session_state.processo_ativo = processo_importacao_id
             st.session_state.importacao_pdf_destino_forcado = ""
             st.session_state.importacao_pdf_sucesso = (
@@ -987,6 +1048,13 @@ elif opcao == "✏️ Dados, Escritório & SST":
                     p_atual["enquadramento_legal_prev"] = st.text_input("Enquadramento Legal", value=p_atual.get("enquadramento_legal_prev", ""))
                     v_met = p_atual.get("doc_ltcat", "")
                     p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação", value=v_met, height=calcula_altura(v_met, 150))
+                    v_conclusao = p_atual.get("conclusao_tecnica", "")
+                    p_atual["conclusao_tecnica"] = st.text_area(
+                        "Conclusão técnica revisada pelo profissional",
+                        value=v_conclusao,
+                        height=calcula_altura(v_conclusao, 150),
+                        help="Não é preenchida automaticamente. Registre a conclusão somente após avaliar os documentos e as evidências do caso.",
+                    )
                     
                     if st.form_submit_button("💾 Salvar Metodologia"):
                         salvar_processo_com_feedback(
@@ -1506,7 +1574,13 @@ elif opcao == "📄 Gerar Documento Word Final":
         )
         
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("📥 Gerar e Baixar Documento Oficial (.docx)"):
+        p, erros_documento = _normalizar_dados_documento(p)
+        for erro_documento in erros_documento:
+            st.error(erro_documento)
+        if st.button(
+            "📥 Gerar e Baixar Documento Oficial (.docx)",
+            disabled=bool(erros_documento),
+        ):
             doc = Document()
             for section in doc.sections:
                 section.top_margin = Cm(3.0)
@@ -1676,12 +1750,11 @@ elif opcao == "📄 Gerar Documento Word Final":
                 add_topic_block(doc, "Análise Crítica da Eficácia dos EPIs", p.get('analise_epis_critica', ''))
 
                 adicionar_titulo("7. CONCLUSÃO TÉCNICA (LTCAT & DADOS PARA O PPP)", level=2)
-                p_conc = doc.add_paragraph()
-                p_conc.paragraph_format.line_spacing = 1.5
-                p_conc.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                r_c = p_conc.add_run("Conclui-se que as atividades desenvolvidas pelo segurado expuseram-no de forma habitual e permanente aos agentes nocivos acima descritos, preenchendo os requisitos legais para o reconhecimento do tempo de serviço especial.")
-                r_c.font.name = 'Abadi'
-                r_c.font.size = Pt(11)
+                add_topic_block(
+                    doc,
+                    "Conclusão técnica revisada pelo profissional",
+                    p.get("conclusao_tecnica", ""),
+                )
 
             else:
                 adicionar_titulo("1. IDENTIFICAÇÃO DO PROCESSO", level=2)

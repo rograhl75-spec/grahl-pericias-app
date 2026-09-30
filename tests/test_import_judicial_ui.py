@@ -38,6 +38,7 @@ class ImportJudicialUiTests(unittest.TestCase):
 
     def test_fluxo_sem_arquivos_nao_chama_api(self):
         streamlit = mock.Mock()
+        streamlit.session_state = {}
         streamlit.file_uploader.return_value = []
 
         with (
@@ -53,6 +54,7 @@ class ImportJudicialUiTests(unittest.TestCase):
 
     def test_bloqueia_quando_custo_projetado_excede_limite(self):
         streamlit = mock.Mock()
+        streamlit.session_state = {}
         arquivo = mock.Mock()
         arquivo.name = "processo.pdf"
         arquivo.size = 1024
@@ -80,6 +82,7 @@ class ImportJudicialUiTests(unittest.TestCase):
 
     def test_falha_na_consolidacao_mostra_mensagem_amigavel_sem_crash(self):
         streamlit = mock.Mock()
+        streamlit.session_state = {}
         arquivo_1 = mock.Mock(name="uploaded_1")
         arquivo_1.name = "parte_1.pdf"
         arquivo_1.size = 1024
@@ -116,6 +119,7 @@ class ImportJudicialUiTests(unittest.TestCase):
 
     def test_fluxo_com_dois_pdfs_processa_ate_registro(self):
         streamlit = mock.Mock()
+        streamlit.session_state = {}
         arquivo_1 = mock.Mock(name="uploaded_1")
         arquivo_1.name = "parte_1.pdf"
         arquivo_1.size = 1024
@@ -169,11 +173,17 @@ class ImportJudicialUiTests(unittest.TestCase):
         self.assertEqual(dados["processo_num"], "0001234-56.2024.5.00.0001")
         consolidar.assert_called_once_with([arquivo_1, arquivo_2])
         estimar_chamadas.assert_called_once_with("texto consolidado", modo_conservador=True)
-        analisar.assert_called_once_with("texto consolidado", processo_id="Proc_01", modo_conservador=True)
+        analisar.assert_called_once_with(
+            "texto consolidado",
+            processo_id="Proc_01",
+            modo_conservador=True,
+            custo_estimado_brl=10.0,
+        )
         self.assertTrue(streamlit.warning.called)
 
     def test_fluxo_com_texto_grande_ativa_modo_conservador(self):
         streamlit = mock.Mock()
+        streamlit.session_state = {}
         arquivo = mock.Mock(name="uploaded")
         arquivo.name = "volume_unico.pdf"
         arquivo.size = 1024
@@ -222,10 +232,66 @@ class ImportJudicialUiTests(unittest.TestCase):
             import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
 
         estimar_chamadas.assert_called_once_with("A" * 700_000, modo_conservador=True)
-        analisar.assert_called_once_with("A" * 700_000, processo_id="Proc_01", modo_conservador=True)
+        analisar.assert_called_once_with(
+            "A" * 700_000,
+            processo_id="Proc_01",
+            modo_conservador=True,
+            custo_estimado_brl=10.0,
+        )
+
+    def test_revisao_persiste_entre_reruns_sem_repetir_chamada_claude(self):
+        streamlit = mock.Mock()
+        streamlit.session_state = {}
+        arquivo = mock.Mock(name="uploaded")
+        arquivo.name = "processo.pdf"
+        arquivo.size = 1024
+        streamlit.file_uploader.return_value = [arquivo]
+        streamlit.columns.side_effect = self._mock_columns
+        streamlit.tabs.side_effect = self._mock_tabs
+        streamlit.button.side_effect = [True, False, False, False, False, False, True, False]
+        streamlit.spinner.return_value = self._streamlit_context()
+
+        config = {
+            "max_pdf_files": 5,
+            "max_file_size_mb": 200,
+            "cost_limit_per_day": 250.0,
+            "max_api_calls_per_day": 50,
+            "cloud_conservative_pdf_count_threshold": 2,
+            "cloud_conservative_chars_threshold": 600_000,
+        }
+        with (
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            mock.patch.object(import_judicial_ui, "obter_app_config", return_value=config),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=10),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=1.0),
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=5.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=0.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=0),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 0.0, 250.0)),
+            mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", return_value=("texto", 10)) as consolidar,
+            mock.patch.object(import_judicial_ui, "estimar_chamadas_necessarias", return_value=1),
+            mock.patch.object(import_judicial_ui, "validar_limite_chamadas_claude", return_value=(True, 0, 50)),
+            mock.patch.object(
+                import_judicial_ui,
+                "analisar_processo_judicial",
+                return_value=({"processo_num": "123"}, 20, 10, 0.1, 1),
+            ) as analisar,
+            mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia", return_value={"status": "sucesso"}),
+        ):
+            primeiro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {})
+            segundo = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {})
+
+        self.assertFalse(primeiro[0])
+        self.assertTrue(segundo[0])
+        self.assertEqual(segundo[1]["processo_num"], "123")
+        consolidar.assert_called_once()
+        analisar.assert_called_once()
 
     def test_falha_da_claude_retorna_fallback_sem_alterar_processo(self):
         streamlit = mock.Mock()
+        streamlit.session_state = {}
         arquivo = mock.Mock(name="uploaded")
         arquivo.name = "processo.pdf"
         arquivo.size = 1024

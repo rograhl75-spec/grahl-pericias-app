@@ -148,6 +148,28 @@ class DatabaseTests(unittest.TestCase):
 
         st_error.assert_called_once()
 
+    def test_salvar_processo_rejeita_snapshot_desatualizado(self):
+        snapshot = mock.Mock(exists=True)
+        snapshot.to_dict.return_value = {"_revision": 2}
+        ref = mock.Mock()
+        ref.get.return_value = snapshot
+        transaction = mock.Mock()
+        fake_db = mock.Mock()
+        fake_db.collection.return_value.document.return_value = ref
+        fake_db.transaction.return_value = transaction
+
+        with (
+            mock.patch.object(database, "_obter_db", return_value=fake_db),
+            mock.patch.object(database.firestore, "transactional", side_effect=lambda fn: fn),
+            mock.patch.object(database.st, "session_state", {}),
+            mock.patch.object(database.st, "error") as st_error,
+        ):
+            resultado = database.salvar_processo("Proc_01", {"_revision": 1})
+
+        self.assertFalse(resultado)
+        transaction.set.assert_not_called()
+        self.assertIn("alterado por outro usuário", st_error.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

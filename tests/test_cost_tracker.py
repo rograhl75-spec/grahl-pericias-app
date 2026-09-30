@@ -62,11 +62,18 @@ class CostTrackerTests(unittest.TestCase):
         self.assertEqual(registro["custo_brl"], 15.0)
 
     def test_calcular_custo_hoje_usa_fieldfilter_no_firestore(self):
-        query = mock.Mock()
-        query.where.return_value = query
-        query.stream.return_value = []
+        query_calls = mock.Mock()
+        query_calls.where.return_value = query_calls
+        query_calls.stream.return_value = []
+        query_imports = mock.Mock()
+        query_imports.where.return_value = query_imports
+        query_imports.stream.return_value = []
+        reserva = mock.Mock()
+        reserva.exists = False
+        query_daily = mock.Mock()
+        query_daily.document.return_value.get.return_value = reserva
         db = mock.Mock()
-        db.collection.return_value = query
+        db.collection.side_effect = [query_calls, query_imports, query_daily]
         filtro = object()
 
         with (
@@ -76,8 +83,49 @@ class CostTrackerTests(unittest.TestCase):
             total = cost_tracker.calcular_custo_hoje()
 
         self.assertEqual(total, 0.0)
-        query.where.assert_called_once_with(filter=filtro)
-        field_filter.assert_called_once()
+        query_calls.where.assert_called_once_with(filter=filtro)
+        query_imports.where.assert_called_once_with(filter=filtro)
+        self.assertEqual(field_filter.call_count, 2)
+
+    def test_reservar_limites_claude_bloqueia_excesso_em_transacao(self):
+        ref = mock.Mock()
+        snapshot = mock.Mock()
+        snapshot.exists = True
+        snapshot.to_dict.return_value = {
+            "chamadas_reservadas": 49,
+            "custo_reservado_brl": 240.0,
+        }
+        ref.get.return_value = snapshot
+        transaction = mock.Mock()
+        db = mock.Mock()
+        db.collection.return_value.document.return_value = ref
+        db.transaction.return_value = transaction
+
+        with (
+            mock.patch.object(cost_tracker, "_obter_db", return_value=db),
+            mock.patch.object(cost_tracker, "contar_chamadas_claude_hoje", return_value=49),
+            mock.patch.object(cost_tracker, "calcular_custo_hoje", return_value=240.0),
+            mock.patch.object(
+                cost_tracker,
+                "obter_app_config",
+                return_value={"max_api_calls_per_day": 50, "cost_limit_per_day": 250.0},
+            ),
+            mock.patch.object(cost_tracker.firestore, "transactional", side_effect=lambda fn: fn),
+        ):
+            with self.assertRaises(cost_tracker.LimiteDiarioExcedido):
+                cost_tracker.reservar_limites_claude(2, 20.0)
+
+        transaction.set.assert_not_called()
+
+    def test_calcular_custo_hoje_falha_fechado_quando_firestore_indisponivel(self):
+        with mock.patch.object(cost_tracker, "_obter_db", side_effect=RuntimeError("offline")):
+            with self.assertRaisesRegex(RuntimeError, "verificar o limite diário de custo"):
+                cost_tracker.calcular_custo_hoje()
+
+    def test_contar_chamadas_falha_fechado_quando_firestore_indisponivel(self):
+        with mock.patch.object(cost_tracker, "_obter_db", side_effect=RuntimeError("offline")):
+            with self.assertRaisesRegex(RuntimeError, "verificar o limite diário de chamadas"):
+                cost_tracker.contar_chamadas_claude_hoje()
 
 
 if __name__ == "__main__":
