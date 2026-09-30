@@ -606,7 +606,7 @@ if "menu_opcao" not in st.session_state: st.session_state.menu_opcao = "➕ Novo
 if "parsed_data" not in st.session_state: st.session_state.parsed_data = {}
 if "gps_field_main" not in st.session_state: st.session_state.gps_field_main = ""
 if "confirmar_exclusao_target" not in st.session_state: st.session_state.confirmar_exclusao_target = ""
-if "confirmar_exclusao_input" not in st.session_state: st.session_state.confirmar_exclusao_input = ""
+if "confirmar_exclusao_input_nonce" not in st.session_state: st.session_state.confirmar_exclusao_input_nonce = 0
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
 if "importacao_pdf_sucesso" not in st.session_state: st.session_state.importacao_pdf_sucesso = ""
 if "importacao_pdf_orientacao" not in st.session_state: st.session_state.importacao_pdf_orientacao = ""
@@ -1461,7 +1461,7 @@ elif opcao == "🗑️ Excluir Processo":
         if st.session_state.confirmar_exclusao_target != processo_id_selecionado:
             if st.button("🗑️ Solicitar Exclusão Definitiva"):
                 st.session_state.confirmar_exclusao_target = processo_id_selecionado
-                st.session_state.confirmar_exclusao_input = ""
+                st.session_state.confirmar_exclusao_input_nonce += 1
                 st.rerun()
         else:
             st.warning("🚨 TEM CERTEZA ABSOLUTA?")
@@ -1470,7 +1470,7 @@ elif opcao == "🗑️ Excluir Processo":
             )
             confirmacao_id = st.text_input(
                 "Digite o ID para confirmar a exclusão permanente:",
-                key="confirmar_exclusao_input",
+                key=f"confirmar_exclusao_input_{st.session_state.confirmar_exclusao_input_nonce}",
             ).strip()
             col_sim, col_nao = st.columns(2)
             with col_sim:
@@ -1480,13 +1480,13 @@ elif opcao == "🗑️ Excluir Processo":
                     else:
                         excluir_processo(processo_id_selecionado)
                         st.session_state.confirmar_exclusao_target = ""
-                        st.session_state.confirmar_exclusao_input = ""
+                        st.session_state.confirmar_exclusao_input_nonce += 1
                         st.session_state.processo_ativo = None
                         st.rerun()
             with col_nao:
                 if st.button("❌ Cancelar"):
                     st.session_state.confirmar_exclusao_target = ""
-                    st.session_state.confirmar_exclusao_input = ""
+                    st.session_state.confirmar_exclusao_input_nonce += 1
                     st.rerun()
 
 elif opcao == "📄 Gerar Documento Word Final":
