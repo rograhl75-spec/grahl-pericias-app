@@ -22,12 +22,48 @@ def _formatar_inteiro(valor: int) -> str:
     return f"{valor:,}".replace(",", ".")
 
 
+def tamanho_arquivo_seguro(arquivo) -> int:
+    """Retorna o tamanho do upload em bytes sem propagar falhas do objeto de arquivo."""
+    try:
+        return max(int(getattr(arquivo, "size", 0) or 0), 0)
+    except (TypeError, ValueError):
+        logger.warning("Não foi possível ler o tamanho do arquivo enviado.")
+        return 0
+
+
+def _primeiros_bytes(arquivo, quantidade: int) -> bytes:
+    """Lê com segurança os primeiros bytes de um upload do Streamlit."""
+    for metodo in ("getbuffer", "getvalue"):
+        leitor = getattr(arquivo, metodo, None)
+        if not callable(leitor):
+            continue
+        try:
+            conteudo = leitor()
+        except Exception:
+            logger.exception("Falha ao ler conteúdo do arquivo enviado via %s", metodo)
+            continue
+        try:
+            return bytes(conteudo[:quantidade])
+        except Exception:
+            logger.exception("Conteúdo do arquivo enviado em formato inesperado (%s)", metodo)
+    return b""
+
+
 @contextmanager
 def _arquivo_pdf_temporario(arquivo, prefixo: str):
-    suffix = Path(arquivo.name).suffix or ".pdf"
+    nome = getattr(arquivo, "name", "arquivo_sem_nome")
+    suffix = Path(nome).suffix or ".pdf"
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix=prefixo, dir="/tmp")
     try:
-        temp.write(arquivo.getbuffer())
+        try:
+            conteudo = arquivo.getbuffer()
+        except Exception as exc:
+            logger.exception("Falha ao obter o conteúdo do arquivo enviado %s", nome)
+            raise ValueError(
+                f"Não foi possível ler o conteúdo de '{nome}'. "
+                "Reenvie o arquivo ou substitua por uma versão íntegra do PDF."
+            ) from exc
+        temp.write(conteudo)
         temp.close()
         yield temp.name
     finally:
@@ -97,28 +133,29 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
     max_chars_total = int(obter_app_config().get("max_pdf_chars_total", 1_200_000))
     
     for idx, arquivo in enumerate(arquivos_pdf, 1):
+        nome_arquivo = getattr(arquivo, "name", "arquivo_sem_nome")
         try:
             with _arquivo_pdf_temporario(arquivo, f"temp_pdf_{idx}_") as temp_path:
                 chars_restantes = max(max_chars_total - total_chars, 0)
                 texto, num_paginas = extrair_texto_pdf(temp_path, max_chars=chars_restantes)
 
             if num_paginas <= 0:
-                logger.warning("PDF ignorado por falha de leitura: %s", arquivo.name)
+                logger.warning("PDF ignorado por falha de leitura: %s", nome_arquivo)
                 raise ValueError(
-                    f"O arquivo '{arquivo.name}' não pôde ser lido ou não possui páginas válidas. "
+                    f"O arquivo '{nome_arquivo}' não pôde ser lido ou não possui páginas válidas. "
                     "Remova-o ou envie uma versão íntegra do PDF; nenhum arquivo foi enviado à análise."
                 )
 
             if not texto.strip():
-                logger.warning("PDF ignorado por não conter texto extraível: %s", arquivo.name)
+                logger.warning("PDF ignorado por não conter texto extraível: %s", nome_arquivo)
                 raise ValueError(
-                    f"O arquivo '{arquivo.name}' não possui texto legível para análise automática. "
+                    f"O arquivo '{nome_arquivo}' não possui texto legível para análise automática. "
                     "Gere uma versão com OCR antes de reenviar; nenhum arquivo foi enviado à análise."
                 )
 
             total_paginas += num_paginas
 
-            cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {arquivo.name}\n{'='*80}\n\n"
+            cabecalho = f"\n\n{'='*80}\nARQUIVO {idx}: {nome_arquivo}\n{'='*80}\n\n"
             tamanho_projetado = total_chars + len(cabecalho) + len(texto)
             if tamanho_projetado > max_chars_total:
                 raise ValueError(
@@ -130,23 +167,24 @@ def consolidar_multiplos_pdfs(arquivos_pdf: List) -> Tuple[str, int]:
             partes_consolidadas.append(cabecalho)
             partes_consolidadas.append(texto)
             total_chars = tamanho_projetado
+            del texto
 
             logger.info(
                 "PDF consolidado com sucesso",
                 extra={
-                    "arquivo": arquivo.name,
+                    "arquivo": nome_arquivo,
                     "paginas": num_paginas,
-                    "tamanho_bytes": arquivo.size,
+                    "tamanho_bytes": tamanho_arquivo_seguro(arquivo),
                 },
             )
-                
+
         except ValueError:
             raise
         except Exception as e:
-            st.error(f"❌ Erro ao processar {arquivo.name}: {e}")
-            logger.exception("Erro ao consolidar PDF %s", arquivo.name)
+            st.error(f"❌ Erro ao processar {nome_arquivo}: {e}")
+            logger.exception("Erro ao consolidar PDF %s", nome_arquivo)
             continue
-    
+
     return "".join(partes_consolidadas), total_paginas
 
 
@@ -173,26 +211,33 @@ def validar_pdfs(arquivos_pdf: List) -> Tuple[bool, str]:
     max_por_arquivo_mb = int(config.get("max_single_pdf_size_mb", 75))
     max_por_arquivo_bytes = max_por_arquivo_mb * 1024 * 1024
     
-    tamanho_total = sum(arquivo.size for arquivo in arquivos_pdf)
+    tamanho_total = sum(tamanho_arquivo_seguro(arquivo) for arquivo in arquivos_pdf)
     if tamanho_total > max_size_bytes:
         tamanho_total_mb = tamanho_total / (1024 * 1024)
         return False, f"❌ Tamanho total de {tamanho_total_mb:.1f}MB excede limite de {max_size_mb}MB."
     
     # Validar se são PDFs e respeitam o limite por arquivo
     for arquivo in arquivos_pdf:
-        if arquivo.size > max_por_arquivo_bytes:
-            tamanho_mb = arquivo.size / (1024 * 1024)
+        tamanho_arquivo = tamanho_arquivo_seguro(arquivo)
+        if tamanho_arquivo > max_por_arquivo_bytes:
+            tamanho_mb = tamanho_arquivo / (1024 * 1024)
             return False, (
-                f"❌ O arquivo '{arquivo.name}' tem {tamanho_mb:.1f}MB e excede o limite "
+                f"❌ O arquivo '{getattr(arquivo, 'name', 'arquivo_sem_nome')}' tem {tamanho_mb:.1f}MB e excede o limite "
                 f"individual de {max_por_arquivo_mb}MB."
             )
 
-        if not arquivo.name.lower().endswith(".pdf"):
-            return False, f"❌ Arquivo '{arquivo.name}' não é um PDF válido."
+        nome_arquivo = getattr(arquivo, "name", "arquivo_sem_nome")
+        if not nome_arquivo.lower().endswith(".pdf"):
+            return False, f"❌ Arquivo '{nome_arquivo}' não é um PDF válido."
 
-        assinatura = bytes(arquivo.getbuffer()[:5])
+        assinatura = _primeiros_bytes(arquivo, 5)
+        if not assinatura:
+            return False, (
+                f"❌ Não foi possível ler o conteúdo de '{nome_arquivo}'. "
+                "Reenvie o arquivo ou substitua por uma versão íntegra do PDF."
+            )
         if assinatura != b"%PDF-":
-            return False, f"❌ Arquivo '{arquivo.name}' não possui assinatura válida de PDF."
+            return False, f"❌ Arquivo '{nome_arquivo}' não possui assinatura válida de PDF."
     
     return True, "✅ Validação OK"
 
@@ -234,9 +279,10 @@ def calcular_total_paginas(arquivos_pdf: List) -> int:
                     total += len(pdf.pages)
                     encontrou_pdf_valido = True
         except Exception as exc:
-            logger.exception("Falha ao calcular páginas do PDF %s", arquivo.name)
+            nome_arquivo = getattr(arquivo, "name", "arquivo_sem_nome")
+            logger.exception("Falha ao calcular páginas do PDF %s", nome_arquivo)
             raise ValueError(
-                f"Não foi possível inspecionar '{arquivo.name}': {exc}. "
+                f"Não foi possível inspecionar '{nome_arquivo}': {exc}. "
                 "Corrija ou remova o arquivo antes de continuar."
             ) from exc
 

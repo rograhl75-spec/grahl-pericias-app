@@ -84,15 +84,28 @@ def _resumir_arquivos(arquivos_pdf) -> str:
 
 
 def _assinatura_arquivos(arquivos_pdf) -> str:
+    """Gera uma assinatura estável dos uploads, tolerando falhas de leitura."""
     digest = hashlib.sha256()
     for arquivo in arquivos_pdf or []:
-        digest.update(arquivo.name.encode("utf-8", errors="replace"))
-        conteudo = arquivo.getvalue()
+        nome = getattr(arquivo, "name", "arquivo_sem_nome")
+        digest.update(str(nome).encode("utf-8", errors="replace"))
+        try:
+            conteudo = arquivo.getvalue()
+        except Exception:
+            logger.warning("Não foi possível ler o conteúdo de %s para assinatura", nome, exc_info=True)
+            conteudo = None
         if isinstance(conteudo, (bytes, bytearray, memoryview)):
             digest.update(conteudo)
         else:
-            digest.update(str(getattr(arquivo, "size", 0)).encode("ascii"))
+            digest.update(str(_tamanho_arquivo(arquivo)).encode("ascii"))
     return digest.hexdigest()
+
+
+def _tamanho_arquivo(arquivo) -> int:
+    try:
+        return max(int(getattr(arquivo, "size", 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _exibir_erro_processamento(
@@ -101,8 +114,16 @@ def _exibir_erro_processamento(
     arquivos_pdf,
     erro: Exception,
 ) -> None:
-    arquivos = _resumir_arquivos(arquivos_pdf)
-    traceback_formatado = "".join(traceback.format_exception(type(erro), erro, erro.__traceback__))
+    try:
+        arquivos = _resumir_arquivos(arquivos_pdf)
+    except Exception:
+        arquivos = "não identificados"
+    try:
+        traceback_formatado = "".join(
+            traceback.format_exception(type(erro), erro, erro.__traceback__)
+        )
+    except Exception:
+        traceback_formatado = repr(erro)
     logger.error(
         "Falha na importação judicial | etapa=%s | processo=%s | arquivos=%s\n%s",
         etapa,
@@ -110,13 +131,16 @@ def _exibir_erro_processamento(
         arquivos,
         traceback_formatado,
     )
-    st.error(
-        f"❌ Falha na etapa '{etapa}'. Revise os PDFs enviados, tente novamente e, se o erro persistir, "
-        "consulte os detalhes técnicos abaixo."
-    )
-    st.caption(f"Processo: {processo_id} • Arquivos: {arquivos}")
-    with st.expander("Detalhes técnicos da falha"):
-        st.code(traceback_formatado)
+    try:
+        st.error(
+            f"❌ Falha na etapa '{etapa}'. Revise os PDFs enviados, tente novamente e, se o erro persistir, "
+            "consulte os detalhes técnicos abaixo."
+        )
+        st.caption(f"Processo: {processo_id} • Arquivos: {arquivos}")
+        with st.expander("Detalhes técnicos da falha"):
+            st.code(traceback_formatado)
+    except Exception:
+        logger.exception("Não foi possível renderizar a mensagem de erro da importação")
 
 
 def aplicar_dados_importados_ao_processo(p_atual: Dict, dados_extraidos: Dict) -> Tuple[Dict, int]:
@@ -135,20 +159,146 @@ def aplicar_dados_importados_ao_processo(p_atual: Dict, dados_extraidos: Dict) -
     return processo_atualizado, campos_preenchidos
 
 
+def _renderizar_resultado_analise(
+    dados_extraidos: Dict,
+    custo_real_brl: float,
+    tokens_entrada: int,
+    tokens_saida: int,
+) -> None:
+    """Renderiza o resumo e as abas de revisão dos dados extraídos."""
+
+    st.success(f"✅ Análise concluída!")
+
+    # Mostrar custo real
+    col_custo_real1, col_custo_real2 = st.columns(2)
+    with col_custo_real1:
+        st.metric("💵 Custo Real", f"R$ {custo_real_brl:.2f}")
+    with col_custo_real2:
+        st.metric("🎯 Tokens Usados", f"{tokens_entrada + tokens_saida:,}")
+
+    # ==================== ETAPA 5: REVISÃO ====================
+    st.markdown("---")
+    st.markdown("#### 👁️ Passo 5: Revisar Dados Extraídos")
+
+    # Abas de revisão
+    tab_resumo, tab_identificacao, tab_contrato, tab_sst, tab_quesitos, tab_raw = st.tabs([
+        "📊 Resumo",
+        "👤 Identificação",
+        "📋 Contrato",
+        "🛡️ SST & Documentos",
+        "❓ Quesitos",
+        "📄 JSON Bruto"
+    ])
+
+    with tab_resumo:
+        st.markdown("**Resumo dos Dados Extraídos:**")
+
+        col_res1, col_res2 = st.columns(2)
+
+        with col_res1:
+            st.write(f"**Processo:** {dados_extraidos.get('processo_num', '[Não localizado]')}")
+            st.write(f"**Reclamante:** {dados_extraidos.get('reclamante_nome', '[Não localizado]')}")
+            st.write(f"**Reclamada:** {dados_extraidos.get('reclamada_nome', '[Não localizado]')}")
+
+        with col_res2:
+            st.write(f"**Órgão Julgador:** {dados_extraidos.get('orgao_julgador', '[Não localizado]')}")
+            st.write(f"**Data Autuação:** {dados_extraidos.get('data_autuacao', '[Não localizado]')}")
+            st.write(f"**Valor da Causa:** {dados_extraidos.get('valor_causa', '[Não localizado]')}")
+
+    with tab_identificacao:
+        st.markdown("**Identificação das Partes:**")
+
+        col_ident1, col_ident2 = st.columns(2)
+
+        with col_ident1:
+            st.write("**Reclamante:**")
+            st.write(f"- Nome: {dados_extraidos.get('reclamante_nome', '[Não localizado]')}")
+            st.write(f"- CPF: {dados_extraidos.get('reclamante_cpf', '[Não localizado]')}")
+            st.write(f"- Data Nascimento: {dados_extraidos.get('segurado_nascimento', '[Não localizado]')}")
+            st.write(f"- Profissão: {dados_extraidos.get('profissao_cargo', '[Não localizado]')}")
+
+        with col_ident2:
+            st.write("**Reclamada:**")
+            st.write(f"- Empresa: {dados_extraidos.get('reclamada_nome', '[Não localizado]')}")
+            st.write(f"- CNPJ: {dados_extraidos.get('reclamada_cnpj', '[Não localizado]')}")
+            st.write(f"- Setor: {dados_extraidos.get('setor', '[Não localizado]')}")
+
+    with tab_contrato:
+        st.markdown("**Dados Contratuais:**")
+
+        st.write(f"**Data Admissão:** {dados_extraidos.get('data_admissao', '[Não localizado]')}")
+        st.write(f"**Status:** {dados_extraidos.get('status_contrato', '[Não localizado]')}")
+        st.write(f"**Período Imprescrito:** {dados_extraidos.get('periodo_imprescrito', '[Não localizado]')}")
+        st.write(f"**Cargos:** {dados_extraidos.get('cargos', '[Não localizado]')}")
+        st.write(f"**Última Remuneração:** {dados_extraidos.get('ultima_remuneracao', '[Não localizado]')}")
+
+    with tab_sst:
+        st.markdown("**SST & Análise de Documentos:**")
+
+        st.write("**Agentes Nocivos:**")
+        st.write(dados_extraidos.get('agentes_alegados', '[Não localizado]'))
+
+        st.markdown("---")
+        st.write("**Análise LTCAT:**")
+        st.write(dados_extraidos.get('doc_ltcat', '[Não localizado]'))
+
+        st.markdown("---")
+        st.write("**Análise PPP:**")
+        st.write(dados_extraidos.get('doc_ppp', '[Não localizado]'))
+
+    with tab_quesitos:
+        st.markdown("**Quesitos Formulados:**")
+
+        st.write("**Quesitos do Juízo:**")
+        st.write(dados_extraidos.get('quesitos_juizo', '[Não localizado]'))
+
+        st.markdown("---")
+        st.write("**Quesitos do Reclamante:**")
+        st.write(dados_extraidos.get('quesitos_autor', '[Não localizado]'))
+
+        st.markdown("---")
+        st.write("**Quesitos da Reclamada:**")
+        st.write(dados_extraidos.get('quesitos_reu', '[Não localizado]'))
+
+    with tab_raw:
+        st.markdown("**JSON Bruto (Para Debug):**")
+        import json
+        st.json(dados_extraidos)
+
+
 def exibir_tela_importacao_pdf(
     processo_id_selecionado: str,
     p_atual: Dict,
 ) -> Tuple[bool, Dict, Dict]:
     """
     Tela completa de importação de PDFs com processamento Claude.
-    
+
+    Qualquer exceção inesperada é convertida em mensagem dentro da página para que
+    o Streamlit não caia na tela global "Oh no. Error running app".
+
     Args:
         processo_id_selecionado: ID do processo ativo
         p_atual: Dados atuais do processo
-        
+
     Returns:
         Tupla: (importado_com_sucesso, dados_do_processo, registro_importacao)
     """
+    try:
+        return _executar_tela_importacao_pdf(processo_id_selecionado, p_atual)
+    except Exception as exc:  # noqa: BLE001 - guarda final para não derrubar o app
+        _exibir_erro_processamento(
+            "executar a importação de PDFs",
+            processo_id_selecionado,
+            None,
+            exc,
+        )
+        return False, p_atual, {}
+
+
+def _executar_tela_importacao_pdf(
+    processo_id_selecionado: str,
+    p_atual: Dict,
+) -> Tuple[bool, Dict, Dict]:
     config = obter_app_config()
     max_pdf_files = int(config.get("max_pdf_files", 5))
     max_size_mb = int(config.get("max_file_size_mb", 200))
@@ -186,7 +336,16 @@ def exibir_tela_importacao_pdf(
     st.markdown("#### ✅ Passo 2: Validar Arquivos")
     
     # Validar PDFs
-    valido, mensagem = validar_pdfs(uploaded_files)
+    try:
+        valido, mensagem = validar_pdfs(uploaded_files)
+    except Exception as exc:
+        _exibir_erro_processamento(
+            "validar os PDFs enviados",
+            processo_id_selecionado,
+            uploaded_files,
+            exc,
+        )
+        return False, p_atual, {}
     
     if not valido:
         st.error(mensagem)
@@ -215,7 +374,7 @@ def exibir_tela_importacao_pdf(
         st.metric("📄 Páginas Total", num_paginas)
     
     with col2:
-        tamanho_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+        tamanho_mb = sum(_tamanho_arquivo(f) for f in uploaded_files) / (1024 * 1024)
         st.metric("📦 Tamanho Total", f"{tamanho_mb:.1f} MB")
     
     with col3:
@@ -224,7 +383,7 @@ def exibir_tela_importacao_pdf(
     # Lista de arquivos
     st.markdown("**Arquivos selecionados:**")
     for f in uploaded_files:
-        st.write(f"✅ {f.name} ({f.size / 1024:.0f} KB)")
+        st.write(f"✅ {getattr(f, 'name', 'arquivo_sem_nome')} ({_tamanho_arquivo(f) / 1024:.0f} KB)")
     
     # ==================== ETAPA 3: ESTIMATIVA DE CUSTO ====================
     st.markdown("#### 💰 Passo 3: Estimativa de Custo")
@@ -332,10 +491,17 @@ def exibir_tela_importacao_pdf(
     st.markdown("---")
     st.markdown("#### ⏳ Processando...")
     
-    # 1. Consolidar PDFs
+    # 1. Consolidar PDFs (o texto completo nunca é mantido em st.session_state)
+    texto_consolidado = ""
+    try:
+        max_chars_total = max(int(config.get("max_pdf_chars_total", 800_000)), 0)
+    except (TypeError, ValueError):
+        max_chars_total = 800_000
+
     if revisao_pendente:
-        texto_consolidado = revisao_pendente["texto_consolidado"]
-        total_paginas = revisao_pendente["total_paginas"]
+        total_paginas = revisao_pendente.get("total_paginas", 0)
+        tamanho_texto = revisao_pendente.get("tamanho_texto", 0)
+        modo_conservador = bool(revisao_pendente.get("modo_conservador", False))
     else:
         try:
             with st.spinner("📚 Consolidando PDFs..."):
@@ -348,24 +514,43 @@ def exibir_tela_importacao_pdf(
                 exc,
             )
             return False, p_atual, {}
-    
-    if not texto_consolidado:
-        st.error(
-            "❌ Não foi possível extrair texto legível dos PDFs enviados. "
-            "Verifique se os arquivos não estão corrompidos, protegidos ou apenas digitalizados sem OCR."
-        )
-        st.caption(
-            f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}. "
-            "Você pode reenviar somente os PDFs válidos ou gerar uma versão com texto pesquisável."
-        )
-        return False, p_atual, {}
 
-    threshold_conservador_pdf = int(config.get("cloud_conservative_pdf_count_threshold", 2))
-    threshold_conservador_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
-    modo_conservador = (
-        len(uploaded_files) >= threshold_conservador_pdf
-        or len(texto_consolidado) >= threshold_conservador_chars
-    )
+        if not texto_consolidado:
+            st.error(
+                "❌ Não foi possível extrair texto legível dos PDFs enviados. "
+                "Verifique se os arquivos não estão corrompidos, protegidos ou apenas digitalizados sem OCR."
+            )
+            st.caption(
+                f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}. "
+                "Você pode reenviar somente os PDFs válidos ou gerar uma versão com texto pesquisável."
+            )
+            return False, p_atual, {}
+
+        tamanho_texto = len(texto_consolidado)
+        if max_chars_total and tamanho_texto > max_chars_total:
+            del texto_consolidado
+            logger.warning(
+                "Importação judicial bloqueada por limite operacional | processo=%s | arquivos=%s | chars=%s | limite=%s",
+                processo_id_selecionado,
+                _resumir_arquivos(uploaded_files),
+                tamanho_texto,
+                max_chars_total,
+            )
+            st.error(
+                "❌ O texto extraído dos PDFs ultrapassa o limite operacional desta instalação "
+                f"({tamanho_texto:,} de {max_chars_total:,} caracteres). "
+                "Divida o processo em lotes menores ou ajuste 'max_pdf_chars_total' nas configurações."
+            )
+            st.caption(f"Processo: {processo_id_selecionado} • Arquivos: {_resumir_arquivos(uploaded_files)}")
+            return False, p_atual, {}
+
+        threshold_conservador_pdf = int(config.get("cloud_conservative_pdf_count_threshold", 2))
+        threshold_conservador_chars = int(config.get("cloud_conservative_chars_threshold", 600_000))
+        modo_conservador = (
+            len(uploaded_files) >= threshold_conservador_pdf
+            or tamanho_texto >= threshold_conservador_chars
+        )
+
     if modo_conservador:
         st.warning(
             "⚠️ Para manter estabilidade no Streamlit Cloud, esta importação entrou automaticamente em modo "
@@ -453,7 +638,12 @@ def exibir_tela_importacao_pdf(
                 exc,
             )
             return False, p_atual, {}
-    
+        finally:
+            # Libera o texto consolidado assim que a análise termina para reduzir
+            # a pressão de memória durante os reruns do Streamlit.
+            texto_consolidado = ""
+            del texto_consolidado
+
     if not dados_extraidos or not isinstance(dados_extraidos, dict):
         logger.warning(
             "Importação judicial não concluída | etapa=%s | processo=%s | arquivos=%s | chamadas=%s",
@@ -479,8 +669,9 @@ def exibir_tela_importacao_pdf(
     if not revisao_pendente:
         revisao_pendente = {
             "assinatura": assinatura_arquivos,
-            "texto_consolidado": texto_consolidado,
+            "tamanho_texto": tamanho_texto,
             "total_paginas": total_paginas,
+            "modo_conservador": modo_conservador,
             "dados_extraidos": dados_extraidos,
             "tokens_entrada": tokens_entrada,
             "tokens_saida": tokens_saida,
@@ -490,105 +681,23 @@ def exibir_tela_importacao_pdf(
         st.session_state[estado_key] = revisao_pendente
     
     custo_real_brl = custo_real * taxa_cambio
-    
-    st.success(f"✅ Análise concluída!")
-    
-    # Mostrar custo real
-    col_custo_real1, col_custo_real2 = st.columns(2)
-    with col_custo_real1:
-        st.metric("💵 Custo Real", f"R$ {custo_real_brl:.2f}")
-    with col_custo_real2:
-        st.metric("🎯 Tokens Usados", f"{tokens_entrada + tokens_saida:,}")
-    
-    # ==================== ETAPA 5: REVISÃO ====================
-    st.markdown("---")
-    st.markdown("#### 👁️ Passo 5: Revisar Dados Extraídos")
-    
-    # Abas de revisão
-    tab_resumo, tab_identificacao, tab_contrato, tab_sst, tab_quesitos, tab_raw = st.tabs([
-        "📊 Resumo",
-        "👤 Identificação",
-        "📋 Contrato",
-        "🛡️ SST & Documentos",
-        "❓ Quesitos",
-        "📄 JSON Bruto"
-    ])
-    
-    with tab_resumo:
-        st.markdown("**Resumo dos Dados Extraídos:**")
-        
-        col_res1, col_res2 = st.columns(2)
-        
-        with col_res1:
-            st.write(f"**Processo:** {dados_extraidos.get('processo_num', '[Não localizado]')}")
-            st.write(f"**Reclamante:** {dados_extraidos.get('reclamante_nome', '[Não localizado]')}")
-            st.write(f"**Reclamada:** {dados_extraidos.get('reclamada_nome', '[Não localizado]')}")
-        
-        with col_res2:
-            st.write(f"**Órgão Julgador:** {dados_extraidos.get('orgao_julgador', '[Não localizado]')}")
-            st.write(f"**Data Autuação:** {dados_extraidos.get('data_autuacao', '[Não localizado]')}")
-            st.write(f"**Valor da Causa:** {dados_extraidos.get('valor_causa', '[Não localizado]')}")
-    
-    with tab_identificacao:
-        st.markdown("**Identificação das Partes:**")
-        
-        col_ident1, col_ident2 = st.columns(2)
-        
-        with col_ident1:
-            st.write("**Reclamante:**")
-            st.write(f"- Nome: {dados_extraidos.get('reclamante_nome', '[Não localizado]')}")
-            st.write(f"- CPF: {dados_extraidos.get('reclamante_cpf', '[Não localizado]')}")
-            st.write(f"- Data Nascimento: {dados_extraidos.get('segurado_nascimento', '[Não localizado]')}")
-            st.write(f"- Profissão: {dados_extraidos.get('profissao_cargo', '[Não localizado]')}")
-        
-        with col_ident2:
-            st.write("**Reclamada:**")
-            st.write(f"- Empresa: {dados_extraidos.get('reclamada_nome', '[Não localizado]')}")
-            st.write(f"- CNPJ: {dados_extraidos.get('reclamada_cnpj', '[Não localizado]')}")
-            st.write(f"- Setor: {dados_extraidos.get('setor', '[Não localizado]')}")
-    
-    with tab_contrato:
-        st.markdown("**Dados Contratuais:**")
-        
-        st.write(f"**Data Admissão:** {dados_extraidos.get('data_admissao', '[Não localizado]')}")
-        st.write(f"**Status:** {dados_extraidos.get('status_contrato', '[Não localizado]')}")
-        st.write(f"**Período Imprescrito:** {dados_extraidos.get('periodo_imprescrito', '[Não localizado]')}")
-        st.write(f"**Cargos:** {dados_extraidos.get('cargos', '[Não localizado]')}")
-        st.write(f"**Última Remuneração:** {dados_extraidos.get('ultima_remuneracao', '[Não localizado]')}")
-    
-    with tab_sst:
-        st.markdown("**SST & Análise de Documentos:**")
-        
-        st.write("**Agentes Nocivos:**")
-        st.write(dados_extraidos.get('agentes_alegados', '[Não localizado]'))
-        
-        st.markdown("---")
-        st.write("**Análise LTCAT:**")
-        st.write(dados_extraidos.get('doc_ltcat', '[Não localizado]'))
-        
-        st.markdown("---")
-        st.write("**Análise PPP:**")
-        st.write(dados_extraidos.get('doc_ppp', '[Não localizado]'))
-    
-    with tab_quesitos:
-        st.markdown("**Quesitos Formulados:**")
-        
-        st.write("**Quesitos do Juízo:**")
-        st.write(dados_extraidos.get('quesitos_juizo', '[Não localizado]'))
-        
-        st.markdown("---")
-        st.write("**Quesitos do Reclamante:**")
-        st.write(dados_extraidos.get('quesitos_autor', '[Não localizado]'))
-        
-        st.markdown("---")
-        st.write("**Quesitos da Reclamada:**")
-        st.write(dados_extraidos.get('quesitos_reu', '[Não localizado]'))
-    
-    with tab_raw:
-        st.markdown("**JSON Bruto (Para Debug):**")
-        import json
-        st.json(dados_extraidos)
-    
+
+    try:
+        _renderizar_resultado_analise(
+            dados_extraidos,
+            custo_real_brl,
+            tokens_entrada,
+            tokens_saida,
+        )
+    except Exception as exc:
+        _exibir_erro_processamento(
+            "exibir os dados extraídos para revisão",
+            processo_id_selecionado,
+            uploaded_files,
+            exc,
+        )
+        return False, p_atual, {}
+
     # ==================== ETAPA 6: CONFIRMAÇÃO ====================
     st.markdown("---")
     st.markdown("#### ✅ Passo 6: Confirmar e Preencher Campos")
