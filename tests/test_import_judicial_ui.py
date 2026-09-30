@@ -224,6 +224,43 @@ class ImportJudicialUiTests(unittest.TestCase):
         estimar_chamadas.assert_called_once_with("A" * 700_000, modo_conservador=True)
         analisar.assert_called_once_with("A" * 700_000, processo_id="Proc_01", modo_conservador=True)
 
+    def test_falha_da_claude_retorna_fallback_sem_alterar_processo(self):
+        streamlit = mock.Mock()
+        arquivo = mock.Mock(name="uploaded")
+        arquivo.name = "processo.pdf"
+        arquivo.size = 1024
+        streamlit.file_uploader.return_value = [arquivo]
+        streamlit.columns.side_effect = self._mock_columns
+        streamlit.button.side_effect = [True, False]
+        streamlit.spinner.return_value = self._streamlit_context()
+
+        with (
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            mock.patch.object(import_judicial_ui, "obter_app_config", return_value={"max_pdf_files": 5, "max_file_size_mb": 200, "cost_limit_per_day": 250.0, "max_api_calls_per_day": 50}),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=10),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=1.0),
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=5.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=0.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=0),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 0.0, 250.0)),
+            mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", return_value=("texto", 10)),
+            mock.patch.object(import_judicial_ui, "estimar_chamadas_necessarias", return_value=1),
+            mock.patch.object(import_judicial_ui, "validar_limite_chamadas_claude", return_value=(True, 0, 50)),
+            mock.patch.object(import_judicial_ui, "analisar_processo_judicial", return_value=({}, 0, 0, 0.0, 0)),
+            mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia") as criar_registro,
+        ):
+            sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
+
+        self.assertFalse(sucesso)
+        self.assertEqual(dados, {"foo": "bar"})
+        self.assertEqual(registro, {})
+        criar_registro.assert_not_called()
+        mensagens = [call.args[0] for call in streamlit.error.call_args_list if call.args]
+        self.assertTrue(any("não retornou dados válidos" in mensagem for mensagem in mensagens))
+        self.assertIn("api_key", streamlit.info.call_args.args[0])
+
     def test_codigo_alterado_nao_usa_use_container_width(self):
         repo_root = Path(__file__).resolve().parents[1]
         for relative_path in ("app.py", "ui/import_judicial_ui.py"):

@@ -19,16 +19,40 @@ logger = logging.getLogger(__name__)
 
 
 def obter_cliente_anthropic():
-    """Inicializa e retorna cliente Anthropic usando API key de st.secrets"""
+    """
+    Inicializa e retorna cliente Anthropic usando API key de st.secrets.
+
+    Não interrompe o app (sem st.stop()): em caso de falha lança exceção controlada
+    para que o chamador exiba mensagem amigável e mantenha a sessão ativa.
+
+    Raises:
+        ConfigurationError: API key ausente/inválida ou secrets indisponíveis.
+        RuntimeError: falha ao criar o cliente Anthropic.
+    """
     try:
         api_key = obter_api_key_anthropic()
-        return anthropic.Anthropic(api_key=api_key)
     except ConfigurationError as exc:
-        st.error(f"❌ Configuração Anthropic inválida: {exc}")
-        st.stop()
-    except Exception as e:
-        st.error(f"❌ Erro ao conectar com Anthropic: {e}")
-        st.stop()
+        logger.error("Configuração Anthropic inválida | etapa=obter_api_key | erro=%s", exc)
+        raise
+    except Exception as exc:
+        logger.error(
+            "Falha ao ler configuração Anthropic | etapa=obter_api_key | tipo=%s | erro=%s",
+            type(exc).__name__,
+            exc,
+        )
+        raise ConfigurationError(
+            "Não foi possível ler st.secrets['anthropic']['api_key']. Verifique os secrets do app."
+        ) from exc
+
+    try:
+        return anthropic.Anthropic(api_key=api_key)
+    except Exception as exc:
+        logger.error(
+            "Falha ao inicializar cliente Anthropic | etapa=criar_cliente | tipo=%s | erro=%s",
+            type(exc).__name__,
+            exc,
+        )
+        raise RuntimeError(f"Não foi possível inicializar o cliente Anthropic: {type(exc).__name__}") from exc
 
 
 def carregar_prompt_judicial():
@@ -299,8 +323,39 @@ def analisar_processo_judicial(
     Returns:
         Tupla: (dados_extraidos_dict, tokens_entrada, tokens_saida, custo_real, num_chamadas)
     """
+    etapa = "inicializar_cliente"
     try:
         cliente = obter_cliente_anthropic()
+    except ConfigurationError as exc:
+        logger.error(
+            "Análise judicial abortada | processo=%s | etapa=%s | tipo=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(exc).__name__,
+            exc,
+        )
+        st.error(
+            "❌ A integração com a Claude não está configurada corretamente. "
+            "Verifique st.secrets['anthropic']['api_key'] nas configurações do app (Streamlit Cloud → Settings → Secrets). "
+            f"Detalhe: {exc}"
+        )
+        return {}, 0, 0, 0.0, 0
+    except Exception as exc:
+        logger.error(
+            "Análise judicial abortada | processo=%s | etapa=%s | tipo=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(exc).__name__,
+            exc,
+        )
+        st.error(
+            "❌ Não foi possível conectar à Claude neste momento. "
+            "Tente novamente em alguns minutos; o app continua disponível para uso manual."
+        )
+        return {}, 0, 0, 0.0, 0
+
+    try:
+        etapa = "preparar_analise"
         prompt = carregar_prompt_judicial()
         config = obter_app_config()
         model = config.get("claude_model", "claude-3-5-sonnet-20241022")
@@ -331,6 +386,7 @@ def analisar_processo_judicial(
         # Exibir status
         with st.spinner("⏳ Analisando processo com Claude 3.5 Sonnet..."):
             if len(chunks) == 1:
+                etapa = "analise_final"
                 conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
                     cliente=cliente,
                     model=model,
@@ -345,6 +401,7 @@ def analisar_processo_judicial(
             else:
                 jsons_parciais = []
                 for indice, chunk in enumerate(chunks, start=1):
+                    etapa = f"analise_chunk_{indice}"
                     conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
                         cliente=cliente,
                         model=model,
@@ -357,6 +414,7 @@ def analisar_processo_judicial(
                     custo_total += custo_real
                     jsons_parciais.append(_parsear_json_resposta(conteudo_resposta))
 
+                etapa = "consolidacao_final"
                 conteudo_resposta, tokens_entrada, tokens_saida, custo_real = _executar_chamada_claude(
                     cliente=cliente,
                     model=model,
@@ -378,25 +436,73 @@ def analisar_processo_judicial(
 
         return dados_extraidos, total_tokens_entrada, total_tokens_saida, custo_total, chamadas_previstas
     except ValueError as exc:
-        logger.warning("Falha controlada na análise judicial (%s): %s", processo_id, exc)
+        logger.warning(
+            "Falha controlada na análise judicial | processo=%s | etapa=%s | tipo=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(exc).__name__,
+            exc,
+        )
         st.error(f"❌ {exc}")
         return {}, 0, 0, 0.0, 0
     except anthropic.APIConnectionError as e:
-        registrar_chamada_claude(processo_id, "erro_conexao", False, {"erro": str(e)})
+        logger.error(
+            "Erro de conexão com Anthropic | processo=%s | etapa=%s | tipo=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(e).__name__,
+            e,
+        )
+        registrar_chamada_claude(processo_id, "erro_conexao", False, {"erro": str(e), "etapa": etapa})
         st.error(f"❌ Erro de conexão com Anthropic: {e}")
         return {}, 0, 0, 0.0, 0
-    except anthropic.RateLimitError:
-        registrar_chamada_claude(processo_id, "rate_limit", False, {})
+    except anthropic.RateLimitError as e:
+        logger.warning(
+            "Rate limit Anthropic | processo=%s | etapa=%s | tipo=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(e).__name__,
+            e,
+        )
+        registrar_chamada_claude(processo_id, "rate_limit", False, {"etapa": etapa})
         st.error("❌ Limite de requisições atingido. Tente novamente em alguns segundos.")
         return {}, 0, 0, 0.0, 0
+    except anthropic.AuthenticationError as e:
+        logger.error(
+            "Autenticação Anthropic recusada | processo=%s | etapa=%s | tipo=%s | status=%s",
+            processo_id,
+            etapa,
+            type(e).__name__,
+            getattr(e, "status_code", None),
+        )
+        registrar_chamada_claude(processo_id, "erro_autenticacao", False, {"etapa": etapa})
+        st.error(
+            "❌ A API key da Anthropic foi recusada. "
+            "Atualize st.secrets['anthropic']['api_key'] com uma chave válida e tente novamente."
+        )
+        return {}, 0, 0, 0.0, 0
     except anthropic.APIStatusError as e:
-        registrar_chamada_claude(processo_id, "erro_status_api", False, {"erro": str(e)})
+        logger.error(
+            "Erro de status na API Anthropic | processo=%s | etapa=%s | tipo=%s | status=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(e).__name__,
+            getattr(e, "status_code", None),
+            e,
+        )
+        registrar_chamada_claude(processo_id, "erro_status_api", False, {"erro": str(e), "etapa": etapa})
         st.error(f"❌ Erro na API Anthropic: {e}")
         return {}, 0, 0, 0.0, 0
     except Exception as e:
-        registrar_chamada_claude(processo_id, "erro_inesperado", False, {"erro": str(e)})
+        logger.exception(
+            "Erro inesperado ao analisar processo | processo=%s | etapa=%s | tipo=%s | erro=%s",
+            processo_id,
+            etapa,
+            type(e).__name__,
+            e,
+        )
+        registrar_chamada_claude(processo_id, "erro_inesperado", False, {"erro": str(e), "etapa": etapa})
         st.error(f"❌ Erro inesperado: {e}")
-        logger.exception(f"Erro ao analisar processo: {e}")
         return {}, 0, 0, 0.0, 0
 
 

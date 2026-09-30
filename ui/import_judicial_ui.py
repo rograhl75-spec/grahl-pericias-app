@@ -325,6 +325,13 @@ def exibir_tela_importacao_pdf(
             modo_conservador=modo_conservador,
         )
     except ValueError as exc:
+        logger.warning(
+            "Importação judicial não concluída | etapa=%s | processo=%s | arquivos=%s | erro=%s",
+            "estimar as chamadas da Claude",
+            processo_id_selecionado,
+            _resumir_arquivos(uploaded_files),
+            exc,
+        )
         st.error(f"❌ {exc}")
         st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
         return False, p_atual, {}
@@ -372,12 +379,26 @@ def exibir_tela_importacao_pdf(
         )
         return False, p_atual, {}
     
-    if not dados_extraidos:
+    if not dados_extraidos or not isinstance(dados_extraidos, dict):
+        logger.warning(
+            "Importação judicial não concluída | etapa=%s | processo=%s | arquivos=%s | chamadas=%s",
+            "processar os PDFs com a Claude",
+            processo_id_selecionado,
+            _resumir_arquivos(uploaded_files),
+            num_chamadas_claude,
+        )
         st.error(
             "❌ A análise da Claude não retornou dados válidos para preencher o processo. "
-            "Revise as mensagens exibidas acima e tente novamente com os PDFs em lotes menores, se necessário."
+            "A importação não foi concluída, mas nenhum dado do processo foi alterado."
         )
-        st.caption(f"Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
+        st.info(
+            "O que fazer:\n"
+            "- Se a mensagem acima indicar configuração/API key, verifique "
+            "st.secrets['anthropic']['api_key'] nas configurações do app.\n"
+            "- Se for erro de conexão, limite ou indisponibilidade da API, aguarde alguns minutos e tente novamente.\n"
+            "- Se o problema persistir, tente enviar os PDFs em lotes menores ou preencha os campos manualmente."
+        )
+        st.caption(f"Processo: {processo_id_selecionado} • Arquivos enviados: {_resumir_arquivos(uploaded_files)}")
         return False, p_atual, {}
     
     custo_real_brl = custo_real * taxa_cambio
