@@ -1,4 +1,5 @@
 import unittest
+from contextlib import ExitStack
 from unittest import mock
 from pathlib import Path
 
@@ -326,6 +327,159 @@ class ImportJudicialUiTests(unittest.TestCase):
         mensagens = [call.args[0] for call in streamlit.error.call_args_list if call.args]
         self.assertTrue(any("não retornou dados válidos" in mensagem for mensagem in mensagens))
         self.assertIn("api_key", streamlit.info.call_args.args[0])
+
+
+    def _config_padrao(self):
+        return {
+            "max_pdf_files": 5,
+            "max_file_size_mb": 200,
+            "cost_limit_per_day": 250.0,
+            "max_api_calls_per_day": 50,
+            "cloud_conservative_pdf_count_threshold": 2,
+            "cloud_conservative_chars_threshold": 600_000,
+            "max_pdf_chars_total": 800_000,
+        }
+
+    def _patches_fluxo_feliz(self, texto="texto consolidado", paginas=10):
+        return (
+            mock.patch.object(import_judicial_ui, "obter_app_config", return_value=self._config_padrao()),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=paginas),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=1.0),
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=5.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=0.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=0),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 0.0, 250.0)),
+            mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", return_value=(texto, paginas)),
+            mock.patch.object(import_judicial_ui, "estimar_chamadas_necessarias", return_value=1),
+            mock.patch.object(import_judicial_ui, "validar_limite_chamadas_claude", return_value=(True, 0, 50)),
+        )
+
+    def _streamlit_para_fluxo(self, botoes):
+        streamlit = mock.Mock()
+        streamlit.session_state = {}
+        arquivo = mock.Mock(name="uploaded")
+        arquivo.name = "processo.pdf"
+        arquivo.size = 1024
+        arquivo.getvalue.return_value = b"%PDF-1.7"
+        streamlit.file_uploader.return_value = [arquivo]
+        streamlit.columns.side_effect = self._mock_columns
+        streamlit.tabs.side_effect = self._mock_tabs
+        streamlit.button.side_effect = botoes
+        streamlit.spinner.return_value = self._streamlit_context()
+        return streamlit, arquivo
+
+    def test_assinatura_tolera_falha_de_getvalue(self):
+        arquivo = mock.Mock()
+        arquivo.name = "processo.pdf"
+        arquivo.size = 2048
+        arquivo.getvalue.side_effect = OSError("stream fechado")
+
+        assinatura = import_judicial_ui._assinatura_arquivos([arquivo])
+
+        self.assertEqual(len(assinatura), 64)
+
+    def test_erro_inesperado_no_pos_processamento_nao_derruba_app(self):
+        streamlit, _ = self._streamlit_para_fluxo([True, False, True, False])
+
+        criar_registro = mock.Mock()
+        patches = [
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            *self._patches_fluxo_feliz(),
+            mock.patch.object(
+                import_judicial_ui,
+                "analisar_processo_judicial",
+                return_value=({"processo_num": "123"}, 20, 10, 0.1, 1),
+            ),
+            mock.patch.object(
+                import_judicial_ui,
+                "_renderizar_resultado_analise",
+                side_effect=RuntimeError("falha inesperada ao renderizar"),
+            ),
+            mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia", criar_registro),
+        ]
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
+
+        self.assertFalse(sucesso)
+        self.assertEqual(dados, {"foo": "bar"})
+        self.assertEqual(registro, {})
+        criar_registro.assert_not_called()
+        self.assertTrue(streamlit.error.called)
+
+    def test_erro_inesperado_global_retorna_fallback_amigavel(self):
+        streamlit = mock.Mock()
+        streamlit.session_state = {}
+
+        with (
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            mock.patch.object(
+                import_judicial_ui,
+                "_executar_tela_importacao_pdf",
+                side_effect=MemoryError("memória insuficiente"),
+            ),
+        ):
+            sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
+
+        self.assertFalse(sucesso)
+        self.assertEqual(dados, {"foo": "bar"})
+        self.assertEqual(registro, {})
+        self.assertTrue(streamlit.error.called)
+
+    def test_limite_operacional_de_caracteres_bloqueia_sem_chamar_claude(self):
+        streamlit, _ = self._streamlit_para_fluxo([True, False])
+        config = self._config_padrao()
+        config["max_pdf_chars_total"] = 1_000
+
+        with (
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            mock.patch.object(import_judicial_ui, "obter_app_config", return_value=config),
+            mock.patch.object(import_judicial_ui, "validar_pdfs", return_value=(True, "ok")),
+            mock.patch.object(import_judicial_ui, "calcular_total_paginas", return_value=10),
+            mock.patch.object(import_judicial_ui, "validar_limite_paginas", return_value=(True, "")),
+            mock.patch.object(import_judicial_ui, "estimar_custo", return_value=1.0),
+            mock.patch.object(import_judicial_ui, "obter_taxa_cambio_usd_brl", return_value=5.0),
+            mock.patch.object(import_judicial_ui, "calcular_custo_hoje", return_value=0.0),
+            mock.patch.object(import_judicial_ui, "contar_chamadas_claude_hoje", return_value=0),
+            mock.patch.object(import_judicial_ui, "validar_limite_diario", return_value=(True, 0.0, 250.0)),
+            mock.patch.object(import_judicial_ui, "consolidar_multiplos_pdfs", return_value=("A" * 2_000, 10)),
+            mock.patch.object(import_judicial_ui, "analisar_processo_judicial") as analisar,
+        ):
+            sucesso, dados, registro = import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {"foo": "bar"})
+
+        self.assertFalse(sucesso)
+        self.assertEqual(dados, {"foo": "bar"})
+        self.assertEqual(registro, {})
+        analisar.assert_not_called()
+        mensagens = [call.args[0] for call in streamlit.error.call_args_list if call.args]
+        self.assertTrue(any("limite operacional" in mensagem for mensagem in mensagens))
+
+    def test_sessao_nao_guarda_texto_consolidado_completo(self):
+        streamlit, _ = self._streamlit_para_fluxo([True, False, False, False])
+        texto = "B" * 5_000
+
+        patches = [
+            mock.patch.object(import_judicial_ui, "st", streamlit),
+            *self._patches_fluxo_feliz(texto=texto),
+            mock.patch.object(
+                import_judicial_ui,
+                "analisar_processo_judicial",
+                return_value=({"processo_num": "123"}, 20, 10, 0.1, 1),
+            ),
+            mock.patch.object(import_judicial_ui, "criar_registro_importacao_ia", return_value={"status": "ok"}),
+        ]
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            import_judicial_ui.exibir_tela_importacao_pdf("Proc_01", {})
+
+        revisao = streamlit.session_state["pdf_import_review::Proc_01"]
+        self.assertNotIn("texto_consolidado", revisao)
+        self.assertEqual(revisao["tamanho_texto"], len(texto))
+        self.assertNotIn(texto, str(revisao))
 
     def test_codigo_alterado_nao_usa_use_container_width(self):
         repo_root = Path(__file__).resolve().parents[1]

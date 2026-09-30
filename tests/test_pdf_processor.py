@@ -124,6 +124,48 @@ class PdfProcessorTests(unittest.TestCase):
                 pdf_processor.consolidar_multiplos_pdfs(arquivos)
 
 
+    def test_validar_pdfs_trata_falha_de_leitura_do_upload(self):
+        arquivo = DummyUpload("processo.pdf", b"%PDF-1.7")
+        arquivo.getbuffer = mock.Mock(side_effect=OSError("stream fechado"))
+
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={}):
+            valido, mensagem = pdf_processor.validar_pdfs([arquivo])
+
+        self.assertFalse(valido)
+        self.assertIn("Não foi possível ler o conteúdo", mensagem)
+
+    def test_validar_pdfs_usa_getvalue_quando_getbuffer_falha(self):
+        arquivo = DummyUpload("processo.pdf", b"%PDF-1.7")
+        arquivo.getbuffer = mock.Mock(side_effect=OSError("stream fechado"))
+        arquivo.getvalue = mock.Mock(return_value=b"%PDF-1.7")
+
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={}):
+            valido, _ = pdf_processor.validar_pdfs([arquivo])
+
+        self.assertTrue(valido)
+
+    def test_validar_pdfs_tolera_tamanho_invalido(self):
+        arquivo = DummyUpload("processo.pdf", b"%PDF-1.7")
+        arquivo.size = None
+
+        with mock.patch.object(pdf_processor, "obter_app_config", return_value={}):
+            valido, _ = pdf_processor.validar_pdfs([arquivo])
+
+        self.assertTrue(valido)
+
+    def test_consolidar_multiplos_pdfs_falha_amigavel_quando_upload_nao_pode_ser_lido(self):
+        arquivo = DummyUpload("corrompido.pdf", b"%PDF-1.7")
+        arquivo.getbuffer = mock.Mock(side_effect=OSError("stream fechado"))
+        streamlit = mock.Mock()
+
+        with (
+            mock.patch.object(pdf_processor, "st", streamlit),
+            mock.patch.object(pdf_processor, "obter_app_config", return_value={"max_pdf_chars_total": 1_000}),
+        ):
+            with self.assertRaisesRegex(ValueError, "corrompido.pdf"):
+                pdf_processor.consolidar_multiplos_pdfs([arquivo])
+
+
 
 if __name__ == "__main__":
     unittest.main()
