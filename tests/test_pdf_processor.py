@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 from contextlib import nullcontext
 
+from core import config
 from core import pdf_processor
 
 
@@ -103,6 +104,37 @@ class PdfProcessorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "corrompido.pdf"):
                 pdf_processor.calcular_total_paginas(arquivos)
 
+
+    def test_limites_operacionais_padrao_sao_seguros_para_o_streamlit_cloud(self):
+        defaults = config.APP_CONFIG_DEFAULTS
+
+        self.assertLessEqual(defaults["max_pdf_pages_total"], 1500)
+        self.assertLessEqual(defaults["max_pdf_chars_total"], 900_000)
+        self.assertLessEqual(defaults["max_file_size_mb"], 120)
+        self.assertLessEqual(defaults["max_single_pdf_size_mb"], 50)
+        self.assertLessEqual(
+            defaults["max_pdf_chars_total"],
+            defaults["claude_chunk_chars"] * defaults["claude_max_chunks"],
+        )
+        self.assertLessEqual(
+            defaults["max_pdf_chars_total"],
+            defaults["claude_chunk_chars_conservative"]
+            * defaults["claude_max_chunks_conservative"],
+        )
+
+    def test_validar_pdfs_rejeita_tamanho_total_acima_do_limite_operacional(self):
+        arquivos = [DummyUpload("grande.pdf", b"%PDF-1.7")]
+        arquivos[0].size = 200 * 1024 * 1024
+
+        with mock.patch.object(
+            pdf_processor,
+            "obter_app_config",
+            return_value={"max_file_size_mb": 120, "max_single_pdf_size_mb": 50},
+        ):
+            valido, mensagem = pdf_processor.validar_pdfs(arquivos)
+
+        self.assertFalse(valido)
+        self.assertIn("excede limite de 120MB", mensagem)
 
     def test_consolidar_multiplos_pdfs_bloqueia_pdf_sem_leitura(self):
         arquivos = [

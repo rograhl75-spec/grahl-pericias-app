@@ -910,10 +910,27 @@ elif opcao == "📥 Importar Processo (PDF)":
     )
 
     if importado_com_sucesso:
-        if criar_novo_na_confirmacao:
-            processo_importacao_id = gerar_proximo_id(db_processos)
-            registro_importacao["processo_id"] = processo_importacao_id
-        if salvar_processo_com_importacao(processo_importacao_id, dados_importados, registro_importacao):
+        importacao_salva = False
+        falha_inesperada = False
+        try:
+            if criar_novo_na_confirmacao:
+                processo_importacao_id = gerar_proximo_id(db_processos)
+                registro_importacao["processo_id"] = processo_importacao_id
+            importacao_salva = salvar_processo_com_importacao(
+                processo_importacao_id, dados_importados, registro_importacao
+            )
+        except Exception:
+            falha_inesperada = True
+            logger.exception(
+                "Falha inesperada ao concluir a importação | processo=%s",
+                processo_importacao_id,
+            )
+            st.error(
+                "❌ Ocorreu um erro inesperado ao concluir a importação. "
+                "Nenhum dado foi perdido: revise os dados e tente salvar novamente."
+            )
+
+        if importacao_salva:
             st.session_state.pop(chave_revisao_importacao, None)
             st.session_state.processo_ativo = processo_importacao_id
             st.session_state.importacao_pdf_destino_forcado = ""
@@ -927,7 +944,7 @@ elif opcao == "📥 Importar Processo (PDF)":
             )
             st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
             st.rerun()
-        else:
+        elif not falha_inesperada:
             st.error("❌ Não foi possível salvar os dados importados no banco.")
 
 elif opcao == "✏️ Dados, Escritório & SST":

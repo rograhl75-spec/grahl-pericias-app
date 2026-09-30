@@ -13,11 +13,11 @@ class ConfigurationError(Exception):
 
 APP_CONFIG_DEFAULTS = {
     "max_api_calls_per_day": 50,
-    "max_file_size_mb": 200,
-    "max_single_pdf_size_mb": 75,
+    "max_file_size_mb": 120,
+    "max_single_pdf_size_mb": 50,
     "max_pdf_files": 5,
-    "max_pdf_pages_total": 3000,
-    "max_pdf_chars_total": 1_200_000,
+    "max_pdf_pages_total": 1500,
+    "max_pdf_chars_total": 900_000,
     "claude_chunk_chars": 120_000,
     "claude_max_chunks": 10,
     "claude_chunk_chars_conservative": 80_000,
