@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from docx.shared import Cm, Inches, Pt, RGBColor
 
 from .constants import LOGO_FILE
-from .photos import decode_photo_base64
+from core.photo_storage import FotoStorageError, resolver_bytes_foto
 from .utils import normalize_epi_list, normalize_process_data, safe_str
 
 PRIMARY_COLOR = RGBColor(27, 54, 93)
@@ -254,15 +254,9 @@ def build_document_bytes(process_data: dict) -> tuple[io.BytesIO, list[str]]:
             try:
                 paragraph = document.add_paragraph()
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                if photo.get("base64"):
-                    image_bytes = decode_photo_base64(photo.get("base64"))
-                    paragraph.add_run().add_picture(io.BytesIO(image_bytes), width=Inches(4.5))
-                elif photo.get("path") and os.path.exists(safe_str(photo.get("path"))):
-                    paragraph.add_run().add_picture(safe_str(photo.get("path")), width=Inches(4.5))
-                else:
-                    warnings.append(f"Foto {index} ignorada: imagem ausente.")
-                    continue
-            except (ValueError, OSError) as exc:
+                image_bytes = resolver_bytes_foto(photo)
+                paragraph.add_run().add_picture(io.BytesIO(image_bytes), width=Inches(4.5))
+            except (ValueError, OSError, FotoStorageError) as exc:
                 warnings.append(f"Foto {index} ignorada: {exc}")
                 continue
             legend = safe_str(photo.get("legenda")) or "Registro fotográfico."

@@ -29,15 +29,14 @@ class ProcessoAlteradoError(RuntimeError):
     """O processo mudou desde sua última leitura."""
 
 
-@st.cache_resource
-def _obter_db():
+def _obter_app_firebase():
     try:
-        firebase_admin.get_app()
+        return firebase_admin.get_app()
     except ValueError:
         try:
             cred_dict = obter_credenciais_firebase()
             cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
+            return firebase_admin.initialize_app(cred)
         except ConfigurationError as exc:
             logger.error("Configuração do Firebase incompleta: %s", exc)
             raise FirebaseIndisponivelError(
@@ -49,6 +48,10 @@ def _obter_db():
                 "Erro ao conectar no Firebase. Verifique st.secrets['firebase']."
             ) from exc
 
+
+@st.cache_resource
+def _obter_db():
+    _obter_app_firebase()
     try:
         return firestore.client()
     except Exception as exc:
@@ -134,7 +137,8 @@ def salvar_processo(id_proc, dados_proc):
         elif "maximum allowed size" in str(exc) or "exceeds the maximum" in str(exc):
             st.error(
                 "O caso excedeu o limite de armazenamento de 1 MB por documento do banco "
-                "(fotos são guardadas dentro do caso). Nada foi salvo nesta tentativa."
+                "(textos, metadados e fotos legadas embutidas; fotos novas ficam no Storage). "
+                "Nada foi salvo nesta tentativa."
             )
         else:
             st.error(f"Erro Crítico de Rede: {exc}")

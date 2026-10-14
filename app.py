@@ -8,7 +8,6 @@ from docx.oxml import parse_xml, OxmlElement
 from docx.oxml.ns import nsdecls, qn
 import os
 import re
-import base64
 import copy
 import io
 import logging
@@ -32,6 +31,7 @@ from core.campo_fotos import (
     resumo_armazenamento,
     separar_por_limite,
 )
+from core.photo_storage import enviar_foto, metadados_storage, resolver_bytes_foto
 from core.field_records import (
     FIELD_RECORD_FIELDS,
     FIELD_RECORD_KEYS,
@@ -1375,30 +1375,36 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         resumo_fotos = resumo_armazenamento(p_salvo, pendentes)
         with st.container(border=True):
             st.markdown(
-                f"**📍 Onde ficam as fotos:** dentro do registro do caso **{caso_id}** na nuvem "
-                f"(banco Firestore › coleção `processos` › documento `{caso_id}` › campo `campo_fotos`). "
-                "Não existe pasta separada no aparelho: depois de salvas, as fotos acompanham o caso "
+                f"**📍 Onde ficam as fotos:** fotos novas do caso **{caso_id}** ficam no **Firebase Storage privado**. "
+                f"No Firestore › coleção `processos` › documento `{caso_id}` › campo `campo_fotos` "
+                "ficam apenas referências e metadados das fotos novas. Fotos legadas continuam embutidas ou no caminho original. "
+                "Não existe pasta nova no aparelho: depois de salvas, as fotos acompanham o caso "
                 "em qualquer dispositivo e entram no Documento Word final."
             )
             col_m1, col_m2, col_m3 = st.columns(3)
             col_m1.metric("☁️ Salvas na nuvem", resumo_fotos["salvas"])
             col_m2.metric("⏳ Pendentes (só nesta sessão)", resumo_fotos["pendentes"])
             col_m3.metric(
-                "💾 Espaço do caso",
+                "💾 Documento Firestore (estimativa)",
                 f"{resumo_fotos['bytes_usados'] / 1024:.0f} / {resumo_fotos['bytes_limite'] / 1024:.0f} KB",
             )
             st.progress(
                 resumo_fotos["fracao_usada"],
-                text=f"{resumo_fotos['fracao_usada'] * 100:.0f}% do limite de armazenamento do caso (~1 MB por documento do banco)",
+                text=f"{resumo_fotos['fracao_usada'] * 100:.0f}% do orçamento do documento (~1 MiB; sem os bytes das fotos novas)",
             )
             st.caption(
+                f"Storage: {resumo_fotos['storage']} foto(s) · Legadas: {resumo_fotos['legadas']} foto(s). "
+                "O documento ainda contém textos, metadados e base64 legado. "
+                "Storage pode ter custos de armazenamento, operações e downloads. Use lotes pequenos; "
+                "cada foto aceita até 10 MiB após compressão. "
                 "Fotos pendentes ficam apenas na memória desta sessão do navegador até serem gravadas "
                 "no caso; se a página for fechada ou recarregada antes disso, elas se perdem."
             )
         if resumo_fotos["fracao_usada"] > 0.85:
             st.warning(
                 "O caso está próximo do limite de armazenamento por documento do banco. "
-                "Novas fotos podem não caber; exclua fotos desnecessárias deste caso se preciso."
+                "Mesmo com fotos novas no Storage, referências, textos e fotos legadas precisam caber. "
+                "Revise o conteúdo do caso; fotos antigas não são migradas automaticamente."
             )
 
         st.markdown("---")
@@ -1417,7 +1423,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             type="secondary" if painel_fotos_aberto else "primary",
             width="stretch",
             on_click=_alternar_painel_fotos, args=(caso_id,),
-            help=f"Adiciona fotos ao caso {caso_id}. Cada lote é gravado no registro do caso na nuvem.",
+            help=f"Envia fotos ao Storage e vincula cada lote ao caso {caso_id} no Firestore.",
         )
 
         img_camera = None
@@ -1427,7 +1433,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 st.markdown(f"##### ➕ Adicionar fotos ao caso {caso_id}")
                 st.caption(
                     "Selecione uma ou várias fotos de uma vez. Cada lote é gravado automaticamente "
-                    f"no registro do caso {caso_id} na nuvem; após salvar, esta área continua aberta "
+                    f"no Storage e vinculado ao caso {caso_id}; após salvar, esta área continua aberta "
                     "para o próximo lote — as fotos já salvas permanecem na galeria abaixo."
                 )
                 # Widgets de captura com chave por caso + versão: após mover os arquivos para a
@@ -1463,12 +1469,13 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         if pendentes:
             st.warning(
                 f"⚠️ {len(pendentes)} foto(s) aguardando gravação no caso {caso_id} — "
-                "ainda NÃO salvas na nuvem (só nesta sessão). Elas não são enviadas para outros casos."
+                "ainda NÃO confirmadas no caso. Um upload pode já ter ocorrido; a fila só sai após "
+                "confirmar o Firestore. Elas não são enviadas para outros casos."
             )
             cols_pend = st.columns(min(len(pendentes), 4))
             for indice_pend, foto_pend in enumerate(pendentes):
                 with cols_pend[indice_pend % len(cols_pend)]:
-                    st.image(base64.b64decode(foto_pend["base64"]), width=120)
+                    st.image(resolver_bytes_foto(foto_pend), width=120)
             col_p1, col_p2, col_p3 = st.columns(3)
             with col_p1:
                 if st.button("🔁 Tentar salvar fotos pendentes", key=f"fotos_reenviar_{caso_id}"):
@@ -1486,31 +1493,57 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 )
 
         if salvar_pendentes_agora:
-            cabem, excedentes = separar_por_limite(p_salvo, pendentes)
-            aviso_limite = (
-                f"Limite de armazenamento do caso {caso_id} atingido: {len(excedentes)} foto(s) "
-                "não cabem no registro do caso (limite de ~1 MB por documento do banco) e "
-                "continuam pendentes nesta sessão. Exclua fotos desnecessárias deste caso ou "
-                "descarte as pendentes."
-            )
-            if not cabem:
-                st.error(aviso_limite)
+            # Recarregar a nuvem pode revelar fotos já salvas por outra tentativa.
+            pendentes, _, _ = adicionar_pendentes(fotos_salvas, [], pendentes)
+            st.session_state.fotos_pendentes[caso_id] = pendentes
+            enviadas = []
+            erro_fotos = ""
+            if caso_id != st.session_state.get("processo_ativo"):
+                erro_fotos = "Gravação bloqueada: o destino não é o caso ativo."
             else:
+                for foto in pendentes:
+                    try:
+                        referencia = metadados_storage(caso_id, foto)
+                        cabem, _ = separar_por_limite(
+                            {**p_salvo, "campo_fotos": fotos_salvas + enviadas}, [referencia],
+                        )
+                        if not cabem:
+                            erro_fotos = (
+                                f"Limite de armazenamento do caso {caso_id} atingido: "
+                                "os metadados não cabem no documento Firestore (~1 MiB). "
+                                "As fotos restantes continuam pendentes; revise textos e fotos legadas."
+                            )
+                            break
+                        enviadas.append(enviar_foto(caso_id, foto))
+                    except Exception as exc:
+                        logger.exception("Falha no upload de fotos do caso %s.", caso_id)
+                        erro_fotos = f"Falha no Storage: {exc}. As fotos restantes continuam pendentes."
+                        break
+            if enviadas:
                 candidato_fotos = copy.deepcopy(p_salvo)
-                candidato_fotos["campo_fotos"] = fotos_salvas + cabem
+                candidato_fotos["campo_fotos"] = fotos_salvas + enviadas
                 if salvar_processo(caso_id, candidato_fotos):
-                    if excedentes:
-                        st.session_state.fotos_pendentes[caso_id] = excedentes
-                        st.session_state[aviso_fotos_key] = aviso_limite
+                    restantes = pendentes[len(enviadas):]
+                    if restantes:
+                        st.session_state.fotos_pendentes[caso_id] = restantes
+                        st.session_state[aviso_fotos_key] = erro_fotos
                     else:
                         st.session_state.fotos_pendentes.pop(caso_id, None)
-                    st.toast(f"✅ {len(cabem)} foto(s) guardada(s) na Nuvem (caso {caso_id})!", icon="📸")
+                    st.toast(
+                        f"✅ {len(enviadas)} foto(s) no Storage e vinculada(s) ao caso {caso_id}!",
+                        icon="📸",
+                    )
                     st.rerun()
                 else:
                     st.error(
-                        "❌ As fotos NÃO foram salvas. Elas continuam pendentes nesta sessão; "
-                        "use “Tentar salvar fotos pendentes”."
+                        "❌ As fotos NÃO foram vinculadas ao caso. Os uploads já feitos serão reutilizados. "
+                        "Elas continuam pendentes nesta sessão; use “Tentar salvar fotos pendentes”."
                     )
+            elif erro_fotos:
+                st.error(erro_fotos)
+            else:
+                st.session_state.fotos_pendentes.pop(caso_id, None)
+                st.rerun()
 
         col_gps, col_limpar = st.columns(2)
         with col_gps:
@@ -1543,10 +1576,11 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                 with st.container():
                     col_img, col_dados = st.columns([1, 2])
                     with col_img:
-                        if "base64" in foto_dict:
-                            st.image(base64.b64decode(foto_dict["base64"]), width=220)
-                        else:
-                            st.warning("[Imagem não encontrada]")
+                        try:
+                            st.image(resolver_bytes_foto(foto_dict), width=220)
+                        except Exception:
+                            logger.exception("Falha ao exibir foto do caso %s.", caso_id)
+                            st.warning("Imagem indisponível. Verifique a conexão/configuração do Storage ou a foto legada.")
                     with col_dados:
                         nova_legenda = st.text_input(
                             f"Legenda {idx+1}",
@@ -1885,11 +1919,11 @@ elif opcao == "📄 Gerar Documento Word Final":
             if p.get("campo_fotos"):
                 adicionar_titulo("REGISTROS FOTOGRÁFICOS DE CAMPO", level=3)
                 for idx, foto_dict in enumerate(p["campo_fotos"]):
-                    if "base64" in foto_dict:
+                    if foto_dict:
                         try:
                             p_img = doc.add_paragraph()
                             p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            img_stream = io.BytesIO(base64.b64decode(foto_dict["base64"]))
+                            img_stream = io.BytesIO(resolver_bytes_foto(foto_dict))
                             p_img.add_run().add_picture(img_stream, width=Inches(4.5))
                             
                             texto_legenda = foto_dict.get("legenda", "Registro fotográfico.")

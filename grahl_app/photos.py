@@ -57,7 +57,7 @@ def build_photo_entry(
 def normalize_photo_entry(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    if not value.get("base64") and not value.get("path"):
+    if not value.get("base64") and not value.get("path") and not value.get("storage_path"):
         return None
     normalized: dict[str, Any] = dict(value)
     if value.get("path"):
