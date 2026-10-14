@@ -131,6 +131,11 @@ def salvar_processo(id_proc, dados_proc):
         logging.exception("Falha ao salvar processo %s", id_proc)
         if isinstance(exc, ProcessoAlteradoError):
             st.error(str(exc))
+        elif "maximum allowed size" in str(exc) or "exceeds the maximum" in str(exc):
+            st.error(
+                "O caso excedeu o limite de armazenamento de 1 MB por documento do banco "
+                "(fotos são guardadas dentro do caso). Nada foi salvo nesta tentativa."
+            )
         else:
             st.error(f"Erro Crítico de Rede: {exc}")
         return False
@@ -139,9 +144,12 @@ def salvar_processo(id_proc, dados_proc):
 def excluir_processo(id_proc):
     try:
         _obter_db().collection("processos").document(id_proc).delete()
+        st.session_state.setdefault("_process_revision_snapshot", {}).pop(id_proc, None)
+        return True
     except Exception as exc:
         logger.exception("Falha ao excluir processo %s", id_proc)
         st.error(f"Erro ao excluir na nuvem: {exc}")
+        return False
 
 
 def _obter_maior_numero_processo(chaves_processos):

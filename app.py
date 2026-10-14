@@ -9,6 +9,7 @@ from docx.oxml.ns import nsdecls, qn
 import os
 import re
 import base64
+import copy
 import io
 import logging
 import html
@@ -24,8 +25,17 @@ from core.database import (
     gerar_proximo_id,
     estimar_proximo_id_local,
 )
+from core.campo_fotos import (
+    DOC_SIZE_BUDGET_BYTES,
+    adicionar_pendentes,
+    criar_foto,
+    estimar_tamanho_documento,
+    ids_fotos,
+    separar_por_limite,
+)
 from core.field_records import (
     FIELD_RECORD_FIELDS,
+    FIELD_RECORD_KEYS,
     atualizar_campos_memorizados,
     validar_registro_campo,
 )
@@ -45,14 +55,62 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def salvar_processo(processo_id, dados):
+def salvar_processo(processo_id, dados, novo=False):
+    """Grava somente no caso ativo (ou no caso recém-criado), nunca em outro ID."""
+    caso_ativo = st.session_state.get("processo_ativo")
+    if not novo and processo_id != caso_ativo:
+        logger.error("Gravação bloqueada: destino %s difere do caso ativo %s.", processo_id, caso_ativo)
+        st.error(
+            f"Gravação bloqueada: o destino ({processo_id}) não é o caso ativo ({caso_ativo}). "
+            "Nenhum dado foi salvo. Confira o caso selecionado e tente novamente."
+        )
+        return False
+    payload = dados
     if "Previdenciário" in str(dados.get("modulo_atuacao", "")):
-        dados = invalidate_review(dados)
-    return _salvar_processo(processo_id, dados)
+        payload = invalidate_review(dados)
+    if not _salvar_processo(processo_id, payload):
+        return False
+    nova_revisao = st.session_state.get("_process_revision_snapshot", {}).get(processo_id)
+    if nova_revisao is not None:
+        dados["_revision"] = nova_revisao
+    return True
 
 
 def _field_widget_key(field_config: dict, processo_id: str) -> str:
     return f"{field_config['widget_key_prefix']}_{processo_id}"
+
+
+def _field_placeholder(field_config: dict, processo_id: str) -> str:
+    # O ID do caso no placeholder isola rascunho local e ditado por voz por caso.
+    return f"{field_config['placeholder']} — caso {processo_id}"
+
+
+def _descartar_rascunho_campo(processo_id: str) -> None:
+    st.session_state.setdefault("campo_rascunhos", {}).pop(processo_id, None)
+    st.session_state.pop(f"campo_validation_errors_{processo_id}", None)
+    for field in FIELD_RECORD_FIELDS:
+        st.session_state.pop(_field_widget_key(field, processo_id), None)
+
+
+def _descartar_fotos_pendentes(processo_id: str) -> None:
+    st.session_state.setdefault("fotos_pendentes", {}).pop(processo_id, None)
+
+
+def _recarregar_caso(processo_id: str) -> None:
+    # Na próxima carga, a revisão esperada passa a ser a atual da nuvem.
+    st.session_state.get("_process_revision_snapshot", {}).pop(processo_id, None)
+
+
+def render_caso_ativo(processo_id: str, dados: dict, papel_padrao: str = "Não Definido") -> None:
+    partes = [f"Caso Ativo: {processo_id}"]
+    nome = str(dados.get("reclamante_nome", "") or "").strip()
+    numero = str(dados.get("processo_num", "") or "").strip()
+    if nome:
+        partes.append(nome)
+    if numero:
+        partes.append(f"Nº {numero}")
+    partes.append(f"Papel: {dados.get('papel_profissional', papel_padrao)}")
+    st.info(" | ".join(partes))
 
 
 def _set_field_widget_value(field_config: dict, processo_id: str, value: str) -> None:
@@ -114,7 +172,7 @@ def render_field_error(message: str | None) -> None:
 def render_field_draft_support(processo_id: str) -> None:
     draft_key = f"grahl-campo-draft::{processo_id}"
     field_map = [
-        {"key": field["key"], "placeholder": field["placeholder"]}
+        {"key": field["key"], "placeholder": _field_placeholder(field, processo_id)}
         for field in FIELD_RECORD_FIELDS
     ]
 
@@ -177,8 +235,9 @@ def render_field_draft_support(processo_id: str) -> None:
                 }}
 
                 function getField(placeholder) {{
+                    const safe = window.CSS && CSS.escape ? CSS.escape(placeholder) : placeholder;
                     return parentDoc.querySelector(
-                        `textarea[placeholder="${{placeholder}}"], input[placeholder="${{placeholder}}"]`
+                        `textarea[placeholder="${{safe}}"], input[placeholder="${{safe}}"]`
                     );
                 }}
 
@@ -350,8 +409,9 @@ def render_voice_dictation_control(widget_placeholder: str, field_label: str, co
                 }}
 
                 function applyTranscript(transcript) {{
+                    const safePlaceholder = window.CSS && CSS.escape ? CSS.escape(targetPlaceholder) : targetPlaceholder;
                     const target = window.parent.document.querySelector(
-                        `textarea[placeholder="${{targetPlaceholder}}"], input[placeholder="${{targetPlaceholder}}"]`
+                        `textarea[placeholder="${{safePlaceholder}}"], input[placeholder="${{safePlaceholder}}"]`
                     );
                     if (!target) {{
                         setStatus("Não foi possível localizar o campo.", "#b91c1c");
@@ -673,7 +733,9 @@ st.set_page_config(page_title="GRAHL Perícias", page_icon=icon_config, layout="
 if "processo_ativo" not in st.session_state: st.session_state.processo_ativo = None
 if "menu_opcao" not in st.session_state: st.session_state.menu_opcao = "➕ Novo Processo / Caso"
 if "parsed_data" not in st.session_state: st.session_state.parsed_data = {}
-if "gps_field_main" not in st.session_state: st.session_state.gps_field_main = ""
+if "gps_por_caso" not in st.session_state: st.session_state.gps_por_caso = {}
+if "campo_rascunhos" not in st.session_state: st.session_state.campo_rascunhos = {}
+if "fotos_pendentes" not in st.session_state: st.session_state.fotos_pendentes = {}
 if "confirmar_exclusao_target" not in st.session_state: st.session_state.confirmar_exclusao_target = ""
 if "confirmar_exclusao_input_nonce" not in st.session_state: st.session_state.confirmar_exclusao_input_nonce = 0
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0  
@@ -739,39 +801,55 @@ if db_processos:
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 
-if processos_filtrados:
-    mapa_opcoes = {}
-    for k in processos_filtrados:
-        v = db_processos[k]
-        nome = v.get("reclamante_nome", "Sem Nome")
-        empresa = v.get("reclamada_nome", "")
-        num_p = v.get("processo_num", "")
-        label = f"[{k}] {nome}"
-        if empresa: label += f" x {empresa}"
-        elif num_p: label += f" ({num_p})"
-        mapa_opcoes[label] = k
+SELETOR_CASO_KEY = "seletor_caso_id"
 
-    if st.session_state.processo_ativo not in processos_filtrados:
-        st.session_state.processo_ativo = processos_filtrados[0]
-        
-    lista_chaves = list(mapa_opcoes.keys())
-    idx_selecionado = 0
-    for i, rotulo in enumerate(lista_chaves):
-        if mapa_opcoes[rotulo] == st.session_state.processo_ativo:
-            idx_selecionado = i
-            break
+
+def _rotulo_caso(k):
+    v = db_processos.get(k, {})
+    label = f"[{k}] {v.get('reclamante_nome', 'Sem Nome')}"
+    empresa = v.get("reclamada_nome", "")
+    num_p = v.get("processo_num", "")
+    if empresa: label += f" x {empresa}"
+    elif num_p: label += f" ({num_p})"
+    return label
+
+
+# Recarga/retorno ao app abre uma nova sessão: restaura o caso escolhido pela URL.
+if st.session_state.processo_ativo is None and st.query_params.get("caso") in db_processos:
+    st.session_state.processo_ativo = st.query_params.get("caso")
+if st.session_state.processo_ativo not in db_processos:
+    st.session_state.processo_ativo = (processos_filtrados or list(db_processos) or [None])[0]
+
+if st.session_state.processo_ativo is not None:
+    # A pesquisa só filtra a lista; nunca troca o caso ativo sem ação explícita.
+    opcoes_casos = list(processos_filtrados)
+    if st.session_state.processo_ativo not in opcoes_casos:
+        opcoes_casos.insert(0, st.session_state.processo_ativo)
+        st.sidebar.caption("Caso ativo mantido; ele não corresponde à pesquisa.")
 
     def atualizar_processo():
-        rotulo_escolhido = st.session_state.caixa_pesquisa
-        novo_id = mapa_opcoes[rotulo_escolhido]
-        st.session_state.processo_ativo = novo_id
-        st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
+        novo_id = st.session_state[SELETOR_CASO_KEY]
+        if novo_id != st.session_state.processo_ativo:
+            st.session_state.processo_ativo = novo_id
+            st.session_state.menu_opcao = "✏️ Dados, Escritório & SST"
 
-    st.sidebar.selectbox("Processo / Caso Selecionado:", options=lista_chaves, index=idx_selecionado, key="caixa_pesquisa", on_change=atualizar_processo)
+    # Opções são IDs estáveis; o estado do widget é sincronizado antes de instanciá-lo
+    # para que a caixa sempre exiba o caso realmente ativo (ex.: após criar/excluir).
+    st.session_state[SELETOR_CASO_KEY] = st.session_state.processo_ativo
+    st.sidebar.selectbox(
+        "Processo / Caso Selecionado:", options=opcoes_casos, format_func=_rotulo_caso,
+        key=SELETOR_CASO_KEY, on_change=atualizar_processo,
+    )
     processo_id_selecionado = st.session_state.processo_ativo
+    if st.query_params.get("caso") != processo_id_selecionado:
+        st.query_params["caso"] = processo_id_selecionado
 else:
     st.sidebar.warning("⚠️ Nenhum caso encontrado.")
     processo_id_selecionado = "Nenhum caso cadastrado"
+    if "caso" in st.query_params:
+        del st.query_params["caso"]
+
+aviso_pendencias = st.sidebar.empty()
 
 if opcao == "➕ Novo Processo / Caso":
     st.markdown("### Cadastrar Novo Caso ou Processo")
@@ -866,7 +944,9 @@ if opcao == "➕ Novo Processo / Caso":
                 p_novo["reclamada_nome"] = p_empresa
                 p_novo["processo_num"] = p_num
             
-            if salvar_processo(id_novo_processo, p_novo):
+            if id_novo_processo in db_processos:
+                st.error(f"❌ O ID {id_novo_processo} já existe; nenhum caso foi sobrescrito. Tente novamente.")
+            elif salvar_processo(id_novo_processo, p_novo, novo=True):
                 st.session_state.parsed_data = {}
                 st.session_state.uploader_key += 1
                 st.session_state.processo_ativo = id_novo_processo
@@ -883,11 +963,12 @@ elif opcao == "✏️ Dados, Escritório & SST":
         p_atual = db_processos[processo_id_selecionado]
         is_prev = "Previdenciário" in p_atual.get("modulo_atuacao", "")
         
-        st.info(
-            f"Caso Ativo: {processo_id_selecionado} | "
-            f"Papel: {p_atual.get('papel_profissional', 'Não Definido')}"
+        render_caso_ativo(processo_id_selecionado, p_atual)
+        st.caption(
+            "Cada aba grava somente ao clicar no respectivo botão Salvar. Alterações não salvas "
+            "são descartadas ao trocar de caso e nunca são gravadas em outro caso."
         )
-        
+
         if is_prev:
             render_extrajudicial(
                 processo_id_selecionado, p_atual,
@@ -1007,7 +1088,8 @@ elif opcao == "✏️ Dados, Escritório & SST":
                         "data_entrega": st.column_config.TextColumn("Data Entrega", width="medium"),
                         "obs": st.column_config.TextColumn("Observações", width="large"),
                     },
-                    num_rows="dynamic", width="stretch", height=350
+                    num_rows="dynamic", width="stretch", height=350,
+                    key=f"epis_{processo_id_selecionado}",
                 )
 
                 if st.button("💾 Salvar Tabela EPIs", key=f"btn_st_{processo_id_selecionado}"):
@@ -1051,24 +1133,27 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
     if not db_processos or processo_id_selecionado == "Nenhum caso cadastrado":
         st.warning("Cadastre ou selecione um caso no menu lateral.")
     else:
-        p_atual = db_processos[processo_id_selecionado]
-        st.info(
-            f"Caso Ativo: {processo_id_selecionado} | "
-            f"Papel: {p_atual.get('papel_profissional', '')}"
-        )
+        caso_id = processo_id_selecionado
+        p_salvo = copy.deepcopy(db_processos[caso_id])
+        p_atual = db_processos[caso_id]
+        rascunho_campo = st.session_state.campo_rascunhos.get(caso_id, {})
+        render_caso_ativo(caso_id, p_atual, "")
+
+        def _valor_inicial_campo(chave):
+            return rascunho_campo.get(chave, p_atual.get(chave, ""))
 
         st.markdown("### 🚜 Vistoria Pericial de Campo")
         st.caption("Campos marcados com * são obrigatórios. Você pode digitar, usar voz ou combinar os dois no mesmo campo.")
-        render_field_draft_support(processo_id_selecionado)
+        render_field_draft_support(caso_id)
 
-        validation_errors_key = f"campo_validation_errors_{processo_id_selecionado}"
+        validation_errors_key = f"campo_validation_errors_{caso_id}"
         campo_errors = st.session_state.get(validation_errors_key, {})
         remembered_fields = st.session_state.campo_valores_memorizados
         if campo_errors:
             valores_atuais = {
                 field["key"]: st.session_state.get(
-                    _field_widget_key(field, processo_id_selecionado),
-                    p_atual.get(field["key"], ""),
+                    _field_widget_key(field, caso_id),
+                    _valor_inicial_campo(field["key"]),
                 )
                 for field in FIELD_RECORD_FIELDS
             }
@@ -1082,119 +1167,132 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         st.markdown("<div class='campo-shortcuts-title'>Atalhos rápidos</div>", unsafe_allow_html=True)
         shortcut_cols = st.columns(4, gap="small")
         with shortcut_cols[0]:
-            if st.button("📅 Usar hoje", key=f"campo_hoje_{processo_id_selecionado}", width="stretch"):
+            if st.button("📅 Usar hoje", key=f"campo_hoje_{caso_id}", width="stretch"):
                 _set_field_widget_value(
                     FIELD_RECORD_FIELDS[0],
-                    processo_id_selecionado,
+                    caso_id,
                     datetime.now().strftime("%d/%m/%Y"),
                 )
         with shortcut_cols[1]:
-            if st.button("🕒 Usar agora", key=f"campo_agora_{processo_id_selecionado}", width="stretch"):
+            if st.button("🕒 Usar agora", key=f"campo_agora_{caso_id}", width="stretch"):
                 _set_field_widget_value(
                     FIELD_RECORD_FIELDS[1],
-                    processo_id_selecionado,
+                    caso_id,
                     datetime.now().strftime("%H:%M"),
                 )
         with shortcut_cols[2]:
             if st.button(
                 "↺ Último local",
-                key=f"campo_local_{processo_id_selecionado}",
+                key=f"campo_local_{caso_id}",
                 width="stretch",
                 disabled=not remembered_fields.get("local_diligencia"),
             ):
                 _set_field_widget_value(
                     FIELD_RECORD_FIELDS[2],
-                    processo_id_selecionado,
+                    caso_id,
                     remembered_fields.get("local_diligencia", ""),
                 )
         with shortcut_cols[3]:
             if st.button(
                 "↺ Últimos presentes",
-                key=f"campo_presentes_{processo_id_selecionado}",
+                key=f"campo_presentes_{caso_id}",
                 width="stretch",
                 disabled=not remembered_fields.get("presentes_pericia"),
             ):
                 _set_field_widget_value(
                     FIELD_RECORD_FIELDS[3],
-                    processo_id_selecionado,
+                    caso_id,
                     remembered_fields.get("presentes_pericia", ""),
                 )
 
-        date_field, time_field = FIELD_RECORD_FIELDS[0], FIELD_RECORD_FIELDS[1]
-        col_c1, col_c2 = st.columns(2, gap="small")
-        with col_c1:
-            p_atual[date_field["key"]] = st.text_input(
-                date_field["label"],
-                value=p_atual.get(date_field["key"], ""),
-                key=_field_widget_key(date_field, processo_id_selecionado),
-                placeholder=date_field["placeholder"],
-            )
-            render_field_error(campo_errors.get(date_field["key"]))
-            render_voice_dictation_control(
-                date_field["placeholder"],
-                date_field["voice_label"],
-                _field_widget_key(date_field, processo_id_selecionado),
-            )
-        with col_c2:
-            p_atual[time_field["key"]] = st.text_input(
-                time_field["label"],
-                value=p_atual.get(time_field["key"], ""),
-                key=_field_widget_key(time_field, processo_id_selecionado),
-                placeholder=time_field["placeholder"],
-            )
-            render_field_error(campo_errors.get(time_field["key"]))
-            render_voice_dictation_control(
-                time_field["placeholder"],
-                time_field["voice_label"],
-                _field_widget_key(time_field, processo_id_selecionado),
-            )
-
-        for field in FIELD_RECORD_FIELDS[2:]:
+        def _render_campo_texto(field):
+            placeholder = _field_placeholder(field, caso_id)
+            current_value = _valor_inicial_campo(field["key"])
             if field["widget"] == "text_input":
                 p_atual[field["key"]] = st.text_input(
                     field["label"],
-                    value=p_atual.get(field["key"], ""),
-                    key=_field_widget_key(field, processo_id_selecionado),
-                    placeholder=field["placeholder"],
+                    value=current_value,
+                    key=_field_widget_key(field, caso_id),
+                    placeholder=placeholder,
                 )
             else:
-                current_value = p_atual.get(field["key"], "")
                 p_atual[field["key"]] = st.text_area(
                     field["label"],
                     value=current_value,
                     height=calcula_altura(current_value, field["min_height"]),
-                    key=_field_widget_key(field, processo_id_selecionado),
-                    placeholder=field["placeholder"],
+                    key=_field_widget_key(field, caso_id),
+                    placeholder=placeholder,
                 )
             render_field_error(campo_errors.get(field["key"]))
             render_voice_dictation_control(
-                field["placeholder"],
+                placeholder,
                 field["voice_label"],
-                _field_widget_key(field, processo_id_selecionado),
+                _field_widget_key(field, caso_id),
             )
+
+        date_field, time_field = FIELD_RECORD_FIELDS[0], FIELD_RECORD_FIELDS[1]
+        col_c1, col_c2 = st.columns(2, gap="small")
+        with col_c1:
+            _render_campo_texto(date_field)
+        with col_c2:
+            _render_campo_texto(time_field)
+
+        for field in FIELD_RECORD_FIELDS[2:]:
+            _render_campo_texto(field)
 
         if campo_errors:
             st.warning("Revise os campos destacados antes de salvar os textos da vistoria.")
 
-        if st.button("💾 Salvar Textos da Vistoria", type="primary", width="stretch"):
+        if st.button("💾 Salvar Textos da Vistoria", type="primary", width="stretch",
+                     key=f"campo_salvar_{caso_id}"):
             erros = validar_registro_campo(p_atual)
             if erros:
                 st.session_state[validation_errors_key] = erros
                 st.rerun()
 
             st.session_state[validation_errors_key] = {}
-            if salvar_processo(processo_id_selecionado, p_atual):
+            candidato_textos = copy.deepcopy(p_salvo)
+            candidato_textos.update({key: p_atual.get(key, "") for key in FIELD_RECORD_KEYS})
+            if salvar_processo(caso_id, candidato_textos):
+                p_salvo = candidato_textos
+                p_atual["_revision"] = candidato_textos.get("_revision")
                 st.session_state.campo_valores_memorizados = atualizar_campos_memorizados(
                     st.session_state.campo_valores_memorizados,
                     p_atual,
                 )
-                st.toast("✅ Textos da vistoria guardados na Nuvem!", icon="💾")
+                st.toast(f"✅ Textos da vistoria guardados na Nuvem (caso {caso_id})!", icon="💾")
+            else:
+                st.error(f"❌ Os textos da vistoria NÃO foram salvos no caso {caso_id}; continuam preservados nesta sessão.")
+
+        campos_alterados = {
+            key: p_atual.get(key, "")
+            for key in FIELD_RECORD_KEYS
+            if str(p_atual.get(key, "") or "") != str(p_salvo.get(key, "") or "")
+        }
+        if campos_alterados:
+            st.session_state.campo_rascunhos[caso_id] = campos_alterados
+            st.warning(
+                f"Os textos da vistoria do caso {caso_id} têm alterações NÃO salvas na nuvem. "
+                "Elas ficam preservadas nesta sessão apenas para este caso; use Salvar ou descarte."
+            )
+            st.button(
+                "↩️ Descartar alterações não salvas dos textos",
+                key=f"campo_descartar_{caso_id}",
+                on_click=_descartar_rascunho_campo,
+                args=(caso_id,),
+            )
+        else:
+            st.session_state.campo_rascunhos.pop(caso_id, None)
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         st.markdown("#### 📍 Captura Rápida de GPS")
-        gps_input_val = st.text_input("Coordenada GPS Atual (Sessão Ativa):", value=st.session_state.get("gps_field_main", ""), placeholder="GPS_TARGET_FIELD")
-        if gps_input_val != st.session_state.get("gps_field_main", ""):
-            st.session_state.gps_field_main = gps_input_val
+        gps_caso = st.text_input(
+            f"Coordenada GPS Atual (caso {caso_id}):",
+            value=st.session_state.gps_por_caso.get(caso_id, ""),
+            key=f"gps_campo_{caso_id}",
+            placeholder="GPS_TARGET_FIELD",
+        )
+        st.session_state.gps_por_caso[caso_id] = gps_caso
 
         components.html("""
             <div style="background: #E2E8F0; padding: 12px; border-radius: 8px; text-align: center; font-family: sans-serif;">
@@ -1253,68 +1351,145 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### 📸 Captura de Evidências Fotográficas")
-        
-        # CADEADO DE SEGURANÇA (Prevenção de Loop do Streamlit)
-        img_camera = st.camera_input("📷 Câmera Web (Apenas para Computador)")
-        if img_camera is not None:
-            file_bytes = img_camera.getvalue()
-            bytes_comprimidos = comprimir_imagem(file_bytes)
-            b64_encoded = base64.b64encode(bytes_comprimidos).decode('utf-8')
-            
-            if not any(f.get("base64") == b64_encoded for f in p_atual.setdefault("campo_fotos", [])):
-                gps_auto = st.session_state.get("gps_field_main", "")
-                p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
-                if salvar_processo(processo_id_selecionado, p_atual):
-                    st.toast("✅ Foto da Câmera guardada na Nuvem!", icon="📸")
-                    st.rerun()
+
+        fotos_salvas = list(p_salvo.get("campo_fotos", []) or [])
+        pendentes = list(st.session_state.fotos_pendentes.get(caso_id, []))
+        versao_key = f"fotos_widget_versao_{caso_id}"
+        versao_fotos = st.session_state.get(versao_key, 0)
+        aviso_fotos_key = f"fotos_aviso_{caso_id}"
+        if st.session_state.get(aviso_fotos_key):
+            st.info(st.session_state.pop(aviso_fotos_key))
+
+        tamanho_caso = estimar_tamanho_documento(p_salvo)
+        st.caption(
+            f"Armazenamento deste caso: {tamanho_caso / 1024:.0f} KB de ~{DOC_SIZE_BUDGET_BYTES / 1024:.0f} KB "
+            "(as fotos ficam guardadas dentro do registro do caso)."
+        )
+        if tamanho_caso > 0.85 * DOC_SIZE_BUDGET_BYTES:
+            st.warning(
+                "O caso está próximo do limite de armazenamento por documento do banco. "
+                "Novas fotos podem não caber; exclua fotos desnecessárias deste caso se preciso."
+            )
+
+        # Widgets de captura com chave por caso + versão: após mover os arquivos para a
+        # fila de pendentes a versão muda, liberando a captura para o próximo ciclo.
+        img_camera = st.camera_input(
+            "📷 Câmera Web (Apenas para Computador)", key=f"camera_{caso_id}_{versao_fotos}"
+        )
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
-        
+
         col_up1, col_up2 = st.columns([3, 1])
-        with col_up1: fotos_upload = st.file_uploader("📸 CÂMERA DO TABLET (Traseira c/ Zoom) ou Galeria", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        with col_up1:
+            fotos_upload = st.file_uploader(
+                "📸 CÂMERA DO TABLET (Traseira c/ Zoom) ou Galeria", type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True, key=f"fotos_upload_{caso_id}_{versao_fotos}",
+            )
         with col_up2:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🗑️ Limpar Todas Fotos"):
-                p_atual["campo_fotos"] = []
-                if salvar_processo(processo_id_selecionado, p_atual):
+            confirmar_limpeza = st.checkbox(
+                f"Confirmo excluir todas as fotos do caso {caso_id}",
+                key=f"fotos_limpar_confirmar_{caso_id}",
+                disabled=not fotos_salvas,
+            )
+            if st.button("🗑️ Limpar Todas Fotos", key=f"fotos_limpar_{caso_id}",
+                         disabled=not (confirmar_limpeza and fotos_salvas)):
+                candidato_fotos = copy.deepcopy(p_salvo)
+                candidato_fotos["campo_fotos"] = []
+                if salvar_processo(caso_id, candidato_fotos):
                     st.rerun()
                 else:
                     st.error("❌ Não foi possível limpar as fotos.")
 
-        if fotos_upload:
-            novas_fotos = False
-            for img in fotos_upload:
-                file_bytes = img.getvalue()
-                bytes_comprimidos = comprimir_imagem(file_bytes)
-                b64_encoded = base64.b64encode(bytes_comprimidos).decode('utf-8')
-                
-                if not any(f.get("base64") == b64_encoded for f in p_atual.setdefault("campo_fotos", [])):
-                    gps_auto = st.session_state.get("gps_field_main", "")
-                    p_atual["campo_fotos"].append({ "base64": b64_encoded, "gps": gps_auto, "legenda": "Registro fotográfico." })
-                    novas_fotos = True
-            if novas_fotos:
-                if salvar_processo(processo_id_selecionado, p_atual):
-                    st.toast("✅ Foto do Tablet/Galeria guardada na Nuvem!", icon="📸")
+        arquivos_novos = ([img_camera] if img_camera is not None else []) + list(fotos_upload or [])
+        salvar_pendentes_agora = False
+        if arquivos_novos:
+            novas_fotos = [
+                criar_foto(comprimir_imagem(arquivo.getvalue()), gps_caso)
+                for arquivo in arquivos_novos
+            ]
+            pendentes, adicionadas, duplicadas = adicionar_pendentes(fotos_salvas, pendentes, novas_fotos)
+            st.session_state.fotos_pendentes[caso_id] = pendentes
+            st.session_state[versao_key] = versao_fotos + 1
+            if duplicadas:
+                st.session_state[aviso_fotos_key] = (
+                    f"{duplicadas} foto(s) ignorada(s) por já estarem cadastradas neste caso."
+                )
+            if adicionadas:
+                salvar_pendentes_agora = True
+            else:
+                st.rerun()
+
+        if pendentes:
+            st.warning(
+                f"⚠️ {len(pendentes)} foto(s) aguardando gravação no caso {caso_id} — "
+                "ainda NÃO salvas na nuvem. Elas não são enviadas para outros casos."
+            )
+            cols_pend = st.columns(min(len(pendentes), 4))
+            for indice_pend, foto_pend in enumerate(pendentes):
+                with cols_pend[indice_pend % len(cols_pend)]:
+                    st.image(base64.b64decode(foto_pend["base64"]), width=120)
+            col_p1, col_p2, col_p3 = st.columns(3)
+            with col_p1:
+                if st.button("🔁 Tentar salvar fotos pendentes", key=f"fotos_reenviar_{caso_id}"):
+                    salvar_pendentes_agora = True
+            with col_p2:
+                st.button(
+                    "🔄 Recarregar versão da nuvem", key=f"fotos_recarregar_{caso_id}",
+                    on_click=_recarregar_caso, args=(caso_id,),
+                    help="Use se o caso foi alterado em outro dispositivo. As fotos pendentes são mantidas.",
+                )
+            with col_p3:
+                st.button(
+                    "🗑️ Descartar fotos pendentes", key=f"fotos_descartar_{caso_id}",
+                    on_click=_descartar_fotos_pendentes, args=(caso_id,),
+                )
+
+        if salvar_pendentes_agora:
+            cabem, excedentes = separar_por_limite(p_salvo, pendentes)
+            aviso_limite = (
+                f"Limite de armazenamento do caso {caso_id} atingido: {len(excedentes)} foto(s) "
+                "não cabem no registro do caso (limite de ~1 MB por documento do banco) e "
+                "continuam pendentes nesta sessão. Exclua fotos desnecessárias deste caso ou "
+                "descarte as pendentes."
+            )
+            if not cabem:
+                st.error(aviso_limite)
+            else:
+                candidato_fotos = copy.deepcopy(p_salvo)
+                candidato_fotos["campo_fotos"] = fotos_salvas + cabem
+                if salvar_processo(caso_id, candidato_fotos):
+                    if excedentes:
+                        st.session_state.fotos_pendentes[caso_id] = excedentes
+                        st.session_state[aviso_fotos_key] = aviso_limite
+                    else:
+                        st.session_state.fotos_pendentes.pop(caso_id, None)
+                    st.toast(f"✅ {len(cabem)} foto(s) guardada(s) na Nuvem (caso {caso_id})!", icon="📸")
                     st.rerun()
+                else:
+                    st.error(
+                        "❌ As fotos NÃO foram salvas. Elas continuam pendentes nesta sessão; "
+                        "use “Tentar salvar fotos pendentes”."
+                    )
 
         st.markdown("<br>---<br>", unsafe_allow_html=True)
         col_ger, col_btn_geral = st.columns([2, 1])
-        with col_ger: st.markdown(f"#### 🖼️ Gerenciar Fotos ({len(p_atual.get('campo_fotos', []))} fotos):")
+        with col_ger: st.markdown(f"#### 🖼️ Gerenciar Fotos ({len(fotos_salvas)} fotos):")
         with col_btn_geral:
-            if st.button("⚡ Salvar GPS em Todas as Fotos"):
-                gps_atual_sessao = st.session_state.get("gps_field_main", "")
-                if gps_atual_sessao:
-                    for f_dict in p_atual["campo_fotos"]: f_dict["gps"] = gps_atual_sessao
-                    if salvar_processo(processo_id_selecionado, p_atual):
+            if st.button("⚡ Salvar GPS em Todas as Fotos", key=f"fotos_gps_todas_{caso_id}"):
+                if gps_caso and fotos_salvas:
+                    candidato_fotos = copy.deepcopy(p_salvo)
+                    for f_dict in candidato_fotos["campo_fotos"]: f_dict["gps"] = gps_caso
+                    if salvar_processo(caso_id, candidato_fotos):
                         st.rerun()
                     else:
                         st.error("❌ Não foi possível atualizar o GPS das fotos.")
 
-        if not p_atual.get("campo_fotos"):
+        if not fotos_salvas:
             st.info("Nenhuma foto cadastrada.")
         else:
-            for idx, foto_dict in enumerate(p_atual["campo_fotos"]):
+            for idx, (foto_id, foto_dict) in enumerate(zip(ids_fotos(fotos_salvas), fotos_salvas)):
                 with st.container():
                     col_img, col_dados = st.columns([1, 2])
                     with col_img:
@@ -1326,28 +1501,30 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         nova_legenda = st.text_input(
                             f"Legenda {idx+1}",
                             value=foto_dict.get("legenda", ""),
-                            key=f"lg_{processo_id_selecionado}_{idx}",
+                            key=f"lg_{caso_id}_{foto_id}",
                         )
                         novo_gps = st.text_input(
                             f"GPS {idx+1}",
                             value=foto_dict.get("gps", ""),
-                            key=f"cg_{processo_id_selecionado}_{idx}",
+                            key=f"cg_{caso_id}_{foto_id}",
                             placeholder="GPS_FOTO",
                         )
-                        
+
                         c_salvar, c_del = st.columns(2)
                         with c_salvar:
-                            if st.button(f"💾 Atualizar {idx+1}"):
-                                p_atual["campo_fotos"][idx]["legenda"] = nova_legenda
-                                p_atual["campo_fotos"][idx]["gps"] = novo_gps
-                                if salvar_processo(processo_id_selecionado, p_atual):
+                            if st.button(f"💾 Atualizar {idx+1}", key=f"foto_atualizar_{caso_id}_{foto_id}"):
+                                candidato_fotos = copy.deepcopy(p_salvo)
+                                candidato_fotos["campo_fotos"][idx]["legenda"] = nova_legenda
+                                candidato_fotos["campo_fotos"][idx]["gps"] = novo_gps
+                                if salvar_processo(caso_id, candidato_fotos):
                                     st.rerun()
                                 else:
                                     st.error("❌ Não foi possível atualizar os dados da foto.")
                         with c_del:
-                            if st.button(f"🗑️ Excluir {idx+1}"):
-                                p_atual["campo_fotos"].pop(idx)
-                                if salvar_processo(processo_id_selecionado, p_atual):
+                            if st.button(f"🗑️ Excluir {idx+1}", key=f"foto_excluir_{caso_id}_{foto_id}"):
+                                candidato_fotos = copy.deepcopy(p_salvo)
+                                candidato_fotos["campo_fotos"].pop(idx)
+                                if salvar_processo(caso_id, candidato_fotos):
                                     st.rerun()
                                 else:
                                     st.error("❌ Não foi possível excluir a foto.")
@@ -1381,11 +1558,16 @@ elif opcao == "🗑️ Excluir Processo":
                     if confirmacao_id != processo_id_selecionado:
                         st.error("❌ Confirmação inválida. A exclusão foi cancelada.")
                     else:
-                        excluir_processo(processo_id_selecionado)
-                        st.session_state.confirmar_exclusao_target = ""
-                        st.session_state.confirmar_exclusao_input_nonce += 1
-                        st.session_state.processo_ativo = None
-                        st.rerun()
+                        if excluir_processo(processo_id_selecionado):
+                            st.session_state.confirmar_exclusao_target = ""
+                            st.session_state.confirmar_exclusao_input_nonce += 1
+                            st.session_state.campo_rascunhos.pop(processo_id_selecionado, None)
+                            st.session_state.fotos_pendentes.pop(processo_id_selecionado, None)
+                            st.session_state.gps_por_caso.pop(processo_id_selecionado, None)
+                            st.session_state.processo_ativo = None
+                            st.session_state.menu_opcao = "➕ Novo Processo / Caso"
+                            st.toast(f"Caso {processo_id_selecionado} excluído. Selecione o próximo caso no menu lateral.")
+                            st.rerun()
             with col_nao:
                 if st.button("❌ Cancelar"):
                     st.session_state.confirmar_exclusao_target = ""
@@ -1687,3 +1869,15 @@ elif opcao == "📄 Gerar Documento Word Final":
                 file_name=f"Documento_Oficial_{p.get('reclamante_nome','Caso').replace(' ','_')}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
+
+pendencias_sessao = [
+    f"{caso}: textos da vistoria" for caso, campos in st.session_state.campo_rascunhos.items()
+    if campos and caso in db_processos
+] + [
+    f"{caso}: {len(fotos)} foto(s)" for caso, fotos in st.session_state.fotos_pendentes.items()
+    if fotos and caso in db_processos
+]
+if pendencias_sessao:
+    aviso_pendencias.warning(
+        "Alterações NÃO salvas nesta sessão:\n\n" + "\n".join(f"- {item}" for item in pendencias_sessao)
+    )
