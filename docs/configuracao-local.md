@@ -39,3 +39,7 @@ Colunas: `periodo_id,tipo,agente,intensidade,unidade,metodo,fonte,via,exposicao,
 `tipo`: `F`, `Q` ou `B`; `epc`/`epi` representam eficácia, com `Sim`, `Não` ou `Não informado`. Registre agente, método, fonte, via e exposição; responsável/conselho são necessários para revisão final de cada registro. Intensidade/unidade podem permanecer vazias quando a avaliação é qualitativa, conforme justificativa profissional. Instrumento/calibração e CA devem ser preenchidos quando aplicáveis. Não há cálculo automático de eficácia, enquadramento legal ou equivalência.
 
 Não há integração de importação PDF/CNIS por OCR neste fluxo.
+
+## Seleção de casos e fotos de campo
+
+O seletor lateral usa o ID do caso (também guardado na URL como `?caso=`); a pesquisa apenas filtra a lista. Gravações só são aceitas para o caso ativo. Fotos capturadas entram numa fila de pendentes do próprio caso, e câmera/uploader são liberados após cada gravação. Falhas mantêm as pendentes. Cada caso tem limite de ~1 MB no banco, porque as fotos ficam dentro do documento. Detalhes e checklist de campo: `docs/auditoria-integridade-campo.md`.
