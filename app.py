@@ -788,7 +788,9 @@ if opcao == "➕ Novo Processo / Caso":
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📥 Importar Documento Base (.docx) — opcional")
-    arquivo_importado = st.file_uploader("Selecione o arquivo Word (campos reconhecidos; importação manual).", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
+    import_label = ("Selecione o arquivo Word (campos reconhecidos; importação manual)."
+                    if is_prev_mod else "Selecione o arquivo Word (preenchimento automático).")
+    arquivo_importado = st.file_uploader(import_label, type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
     import_signature = (modulo_escolhido,
                         hashlib.sha256(arquivo_importado.getvalue()).hexdigest()
                         if arquivo_importado is not None else None)
@@ -801,16 +803,21 @@ if opcao == "➕ Novo Processo / Caso":
             doc_ext = Document(arquivo_importado)
             dados_extraidos = (parse_extrajudicial_docx(doc_ext, parse_pre_relatorio)
                                if is_prev_mod else parse_pre_relatorio(doc_ext))
-            st.json(dados_extraidos)
-            st.caption("Prévia somente. Nenhum campo digitado será substituído sem confirmação.")
-            if st.button("Usar campos reconhecidos no novo caso",
-                         key=f"confirmar_import_novo_{st.session_state.uploader_key}"):
+            confirmar_importacao = False
+            if is_prev_mod:
+                st.json(dados_extraidos)
+                st.caption("Prévia somente. Nenhum campo digitado será substituído sem confirmação.")
+                confirmar_importacao = st.button(
+                    "Usar campos reconhecidos no novo caso",
+                    key=f"confirmar_import_novo_{st.session_state.uploader_key}")
+            if not is_prev_mod or confirmar_importacao:
                 st.session_state.parsed_data = dados_extraidos
                 for field, short in (("processo_num", "num"), ("reclamante_nome", "nome"),
                                      ("reclamada_nome", "emp")):
                     if field in dados_extraidos:
                         st.session_state[f"novo_{short}_{st.session_state.uploader_key}"] = dados_extraidos[field]
-                st.success("Importação confirmada. Revise os dados antes de criar o caso.")
+                if is_prev_mod:
+                    st.success("Importação confirmada. Revise os dados antes de criar o caso.")
         except Exception as e:
             st.session_state.parsed_data = {}
             st.error(f"Erro ao ler o arquivo: {e}")

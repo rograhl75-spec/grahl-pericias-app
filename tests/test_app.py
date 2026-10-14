@@ -1,7 +1,9 @@
+import io
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from docx import Document
 from streamlit.testing.v1 import AppTest
 
 from core import database
@@ -73,6 +75,41 @@ class AppTests(unittest.TestCase):
                     "Previdenciário" in self.processos["Proc_01"]["modulo_atuacao"],
                     previdenciario,
                 )
+
+    def test_importacao_judicial_preenche_imediatamente_e_reseta_ao_trocar_modulo(self):
+        fields = {
+            "processo_num": "123",
+            "reclamante_nome": "Autor importado",
+            "reclamada_nome": "Empresa importada",
+        }
+        doc = Document()
+        for field, value in fields.items():
+            doc.add_paragraph(f"[START_{field.upper()}]{value}[END_{field.upper()}]")
+        upload = io.BytesIO()
+        doc.save(upload)
+        upload.seek(0)
+        app = AppTest.from_file(str(APP_FILE)).run()
+        for short in ("num", "nome", "emp"):
+            app.session_state[f"novo_{short}_0"] = "Valor digitado"
+
+        with mock.patch("streamlit.file_uploader", return_value=upload):
+            app.run()
+            self.assertFalse(app.exception)
+            for field, short in (("processo_num", "num"), ("reclamante_nome", "nome"),
+                                 ("reclamada_nome", "emp")):
+                self.assertEqual(app.session_state["parsed_data"][field], fields[field])
+                self.assertEqual(app.text_input(key=f"novo_{short}_0").value, fields[field])
+            self.assertEqual(
+                [button.label for button in app.main.button], ["Criar Caso Completo"]
+            )
+
+            app.radio[0].set_value(app.radio[0].options[1]).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.session_state["parsed_data"], {})
+            self.assertIn(
+                "Usar campos reconhecidos no novo caso",
+                [button.label for button in app.main.button],
+            )
 
     def test_demais_telas_abrem_com_caso_existente(self):
         self.processos["Proc_01"] = criar_dados_padrao()
