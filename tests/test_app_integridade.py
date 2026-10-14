@@ -243,6 +243,42 @@ class IntegridadeAppTests(unittest.TestCase):
         self.assertEqual(self.gravacoes.count("Proc_01"), 4)
         self.assertEqual(self.processos["Proc_02"]["campo_fotos"], [])
 
+    def test_botao_adicionar_fotos_abre_area_por_caso_e_permite_novos_lotes(self):
+        from core.campo_fotos import criar_foto
+        self.processos["Proc_01"]["campo_fotos"] = [criar_foto(_Arquivo("black").getvalue())]
+        app = self._app()
+        self._ir_campo(app)
+        botao = app.button(key="fotos_adicionar_Proc_01")
+        self.assertEqual(botao.label, "➕ Adicionar novas fotos")
+        # Caso já com fotos: área fechada, uploader não é exibido (nada é consumido).
+        self._enviar(app, "Proc_01", _Arquivo("red"))
+        self.assertEqual(self.gravacoes, [])
+        self.uploads.clear()
+
+        botao.click().run()
+        self.assertTrue(app.session_state["fotos_adicionar_aberto_Proc_01"])
+        self.assertEqual(app.button(key="fotos_adicionar_Proc_01").label,
+                         "✖️ Fechar área de adição de fotos")
+        self._enviar(app, "Proc_01", _Arquivo("red"), _Arquivo("blue"))
+        self.assertEqual(len(self.processos["Proc_01"]["campo_fotos"]), 3)
+        # A área continua aberta após salvar: próximo lote sem cliques extras.
+        self.assertTrue(app.session_state["fotos_adicionar_aberto_Proc_01"])
+        self._enviar(app, "Proc_01", _Arquivo("green"))
+        fotos = self.processos["Proc_01"]["campo_fotos"]
+        self.assertEqual(len(fotos), 4)
+        self.assertEqual(fotos[0], criar_foto(_Arquivo("black").getvalue()))
+        self.assertEqual(len({f["base64"] for f in fotos}), 4)
+        self.assertEqual(self.gravacoes, ["Proc_01", "Proc_01"])
+
+        # Estado de abertura é por caso e o local de armazenamento é explícito.
+        self.assertTrue(any("documento `Proc_01`" in m.value for m in app.markdown))
+        self.assertEqual([m.value for m in app.metric if m.label.startswith("☁️")], ["4"])
+        self._selecionar(app, "Proc_02")
+        self._ir_campo(app)
+        self.assertTrue(app.session_state["fotos_adicionar_aberto_Proc_02"])
+        self.assertTrue(any("documento `Proc_02`" in m.value for m in app.markdown))
+        self.assertEqual(self.processos["Proc_02"]["campo_fotos"], [])
+
     def test_camera_libera_nova_captura_apos_salvar(self):
         app = self._app()
         self._ir_campo(app)

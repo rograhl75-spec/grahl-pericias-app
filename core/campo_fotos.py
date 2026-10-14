@@ -70,3 +70,16 @@ def separar_por_limite(dados_base, pendentes, limite=DOC_SIZE_BUDGET_BYTES):
         tamanho += acrescimo
         cabem.append(foto)
     return cabem, []
+
+
+def resumo_armazenamento(dados_caso, pendentes=None, limite=DOC_SIZE_BUDGET_BYTES):
+    """Situação das fotos do caso: salvas no registro (nuvem) x pendentes na sessão."""
+    dados_caso = dados_caso or {}
+    usados = estimar_tamanho_documento(dados_caso)
+    return {
+        "salvas": len(list(dados_caso.get("campo_fotos", []) or [])),
+        "pendentes": len(list(pendentes or [])),
+        "bytes_usados": usados,
+        "bytes_limite": limite,
+        "fracao_usada": min(usados / limite, 1.0) if limite else 1.0,
+    }
