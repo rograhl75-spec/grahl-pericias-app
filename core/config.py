@@ -11,51 +11,6 @@ class ConfigurationError(Exception):
     """Erro de configuração obrigatória do app."""
 
 
-APP_CONFIG_DEFAULTS = {
-    "max_api_calls_per_day": 50,
-    "max_file_size_mb": 200,
-    "max_single_pdf_size_mb": 75,
-    "max_pdf_files": 5,
-    # Limites da importação PDF -> Claude (sobrescrevíveis em st.secrets["app"]).
-    # 1.200.000 caracteres é o teto que o pipeline da Claude consegue processar
-    # nos dois modos (claude_chunk_chars x claude_max_chunks = 120.000 x 10 e
-    # modo conservador 80.000 x 15), o que comporta processos judiciais usuais
-    # divididos em partes (~400-600 páginas com texto). O limite de 800.000 era
-    # restritivo demais para processos em duas partes. A memória fica contida
-    # porque o texto não é guardado em st.session_state e o cache de cada página
-    # do pdfplumber é liberado durante a extração. Acima do limite a importação
-    # falha de forma controlada, sem truncar nem importar parcialmente.
-    "max_pdf_pages_total": 3000,
-    "max_pdf_chars_total": 1_200_000,
-    # Importação em lotes (opt-in pelo usuário quando o texto passa de
-    # max_pdf_chars_total): cada lote respeita max_pdf_chars_total e é analisado
-    # separadamente; os resultados são mesclados de forma determinística.
-    "pdf_batch_import_enabled": True,
-    "max_pdf_batches": 4,
-    "claude_chunk_chars": 120_000,
-    "claude_max_chunks": 10,
-    "claude_chunk_chars_conservative": 80_000,
-    "claude_max_chunks_conservative": 15,
-    "cloud_conservative_pdf_count_threshold": 2,
-    "cloud_conservative_chars_threshold": 600_000,
-    # Modelo padrão ativo (evita 404 not_found_error por modelo depreciado).
-    "claude_model": "claude-sonnet-4-6",
-    "claude_model_pricing": {
-        "claude-sonnet-4-6": {
-            "input_usd_per_million_tokens": 3.00,
-            "output_usd_per_million_tokens": 15.00,
-        },
-        # Compatibilidade com secrets legados que ainda usem o modelo antigo.
-        "claude-3-5-sonnet-20241022": {
-            "input_usd_per_million_tokens": 3.00,
-            "output_usd_per_million_tokens": 15.00,
-        },
-    },
-    "cost_limit_per_day": 250.00,
-    "usd_brl_exchange_rate": 5.00,
-    "environment": "production",
-}
-
 FIREBASE_REQUIRED_FIELDS = (
     "type",
     "project_id",
@@ -162,35 +117,6 @@ def _valor_placeholder(valor):
         "insira_",
     )
     return any(token in valor_lower for token in placeholders)
-
-
-def obter_app_config():
-    config = copy.deepcopy(APP_CONFIG_DEFAULTS)
-    try:
-        configuracao_secrets = dict(st.secrets.get("app", {}))
-        precos_modelo = dict(configuracao_secrets.pop("claude_model_pricing", {}) or {})
-        config.update(configuracao_secrets)
-        config["claude_model_pricing"].update(precos_modelo)
-    except Exception:
-        pass
-    return config
-
-
-def obter_taxa_cambio_usd_brl() -> float:
-    try:
-        taxa = float(obter_app_config().get("usd_brl_exchange_rate", 5.00))
-        return max(taxa, 0.0)
-    except (TypeError, ValueError):
-        return 5.00
-
-
-def obter_api_key_anthropic():
-    api_key = str(st.secrets.get("anthropic", {}).get("api_key", "")).strip()
-    if _valor_placeholder(api_key):
-        raise ConfigurationError(
-            "Configure st.secrets['anthropic']['api_key'] com uma chave válida da Anthropic."
-        )
-    return api_key
 
 
 def obter_credenciais_firebase():
