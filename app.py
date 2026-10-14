@@ -13,12 +13,13 @@ import io
 import logging
 import html
 import json
+import hashlib
 from datetime import datetime
 
 from core.config import LOGO_FILE, criar_dados_padrao
 from core.database import (
     carregar_dados,
-    salvar_processo,
+    salvar_processo as _salvar_processo,
     excluir_processo,
     gerar_proximo_id,
     estimar_proximo_id_local,
@@ -30,12 +31,24 @@ from core.field_records import (
 )
 from core.utils import remover_acentos, calcula_altura, comprimir_imagem
 from ui import aplicar_estilos
+from core.extrajudicial import (
+    new_defaults as extrajudicial_defaults, invalidate_review, final_errors,
+    parse_docx as parse_extrajudicial_docx, recognized_import,
+)
+from core.extrajudicial_document import append_extrajudicial, build_extrajudicial_bytes
+from ui.extrajudicial import render_extrajudicial
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def salvar_processo(processo_id, dados):
+    if "Previdenciário" in str(dados.get("modulo_atuacao", "")):
+        dados = invalidate_review(dados)
+    return _salvar_processo(processo_id, dados)
 
 
 def _field_widget_key(field_config: dict, processo_id: str) -> str:
@@ -775,25 +788,34 @@ if opcao == "➕ Novo Processo / Caso":
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📥 Importar Documento Base (.docx) — opcional")
-    arquivo_importado = st.file_uploader("Selecione o arquivo Word (com ou sem tags da IA).", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
+    arquivo_importado = st.file_uploader("Selecione o arquivo Word (campos reconhecidos; importação manual).", type=["docx"], key=f"uploader_{st.session_state.uploader_key}")
+    import_signature = (modulo_escolhido,
+                        hashlib.sha256(arquivo_importado.getvalue()).hexdigest()
+                        if arquivo_importado is not None else None)
+    if st.session_state.get("novo_import_signature") != import_signature:
+        st.session_state.parsed_data = {}
+        st.session_state.novo_import_signature = import_signature
     
     if arquivo_importado is not None:
         try:
             doc_ext = Document(arquivo_importado)
-            dados_extraidos = parse_pre_relatorio(doc_ext)
-            st.session_state.parsed_data = dados_extraidos
-            
-            key_num = f"novo_num_{st.session_state.uploader_key}"
-            key_nome = f"novo_nome_{st.session_state.uploader_key}"
-            key_emp = f"novo_emp_{st.session_state.uploader_key}"
-            
-            st.session_state[key_num] = dados_extraidos.get("processo_num", "") or ""
-            st.session_state[key_nome] = dados_extraidos.get("reclamante_nome", "") or ""
-            st.session_state[key_emp] = dados_extraidos.get("reclamada_nome", "") or ""
-            
-            st.success("🤖 Documento lido com sucesso!")
+            dados_extraidos = (parse_extrajudicial_docx(doc_ext, parse_pre_relatorio)
+                               if is_prev_mod else parse_pre_relatorio(doc_ext))
+            st.json(dados_extraidos)
+            st.caption("Prévia somente. Nenhum campo digitado será substituído sem confirmação.")
+            if st.button("Usar campos reconhecidos no novo caso",
+                         key=f"confirmar_import_novo_{st.session_state.uploader_key}"):
+                st.session_state.parsed_data = dados_extraidos
+                for field, short in (("processo_num", "num"), ("reclamante_nome", "nome"),
+                                     ("reclamada_nome", "emp")):
+                    if field in dados_extraidos:
+                        st.session_state[f"novo_{short}_{st.session_state.uploader_key}"] = dados_extraidos[field]
+                st.success("Importação confirmada. Revise os dados antes de criar o caso.")
         except Exception as e:
+            st.session_state.parsed_data = {}
             st.error(f"Erro ao ler o arquivo: {e}")
+    elif st.session_state.get("parsed_data"):
+        st.session_state.parsed_data = {}
 
     st.markdown("<br>", unsafe_allow_html=True)
     with st.form("form_novo"):
@@ -819,9 +841,13 @@ if opcao == "➕ Novo Processo / Caso":
         if btn_criar_caso:
             id_novo_processo = gerar_proximo_id(db_processos)
             p_novo = criar_dados_padrao()
+            if is_prev_mod:
+                p_novo.update(extrajudicial_defaults())
+                if parsed:
+                    parsed = recognized_import(parsed)
             if parsed:
                 for k, v in parsed.items():
-                    if v: p_novo[k] = v
+                    if is_prev_mod or v: p_novo[k] = v
             if is_prev_mod:
                 p_novo["modulo_atuacao"] = "Laudo Extrajudicial Previdenciário (LTCAT+PPP)"
                 p_novo["reclamante_nome"] = p_nome
@@ -856,120 +882,11 @@ elif opcao == "✏️ Dados, Escritório & SST":
         )
         
         if is_prev:
-            tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Segurado & Tomador", "2️⃣ APR-HO & Extemporaneidade", "3️⃣ Planilha de EPIs", "4️⃣ Metodologia & Enquadramento"])
-            with tab1:
-                st.markdown("### 1. Identificação do Segurado e da Empresa")
-                with st.form(f"fp_1_{processo_id_selecionado}"):
-                    roles = ["Perito do Juízo", "Assistente Técnico da Reclamante", "Assistente Técnico da Reclamada", "Perito Extrajudicial / Consultor"]
-                    atual_role = p_atual.get("papel_profissional", "Perito Extrajudicial / Consultor")
-                    if atual_role not in roles: roles.append(atual_role)
-                    p_atual["papel_profissional"] = st.selectbox("Meu Papel", roles, index=roles.index(atual_role))
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        p_atual["reclamante_nome"] = st.text_input("Nome do Segurado", value=p_atual.get("reclamante_nome", ""))
-                        p_atual["reclamante_cpf"] = st.text_input("CPF / NIT / PIS", value=p_atual.get("reclamante_cpf", ""))
-                        p_atual["segurado_nascimento"] = st.text_input("Data de Nascimento", value=p_atual.get("segurado_nascimento", ""))
-                        p_atual["profissao_cargo"] = st.text_input("Profissão / Cargo Avaliado", value=p_atual.get("profissao_cargo", ""))
-                    with col2:
-                        p_atual["reclamada_nome"] = st.text_input("Razão Social da Empresa / Tomador", value=p_atual.get("reclamada_nome", ""))
-                        p_atual["reclamada_cnpj"] = st.text_input("CNPJ da Empresa", value=p_atual.get("reclamada_cnpj", ""))
-                        p_atual["setor"] = st.text_input("Setor / Lotação / Local", value=p_atual.get("setor", ""))
-                        p_atual["data_admissao"] = st.text_input("Período de Trabalho (Admissão - Demissão)", value=p_atual.get("data_admissao", ""))
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    val_relato = p_atual.get("relato_inicial", "")
-                    p_atual["relato_inicial"] = st.text_area("Relato Inicial / Atividades Desenvolvidas pelo Segurado", value=val_relato, height=calcula_altura(val_relato, 120))
-                    
-                    if st.form_submit_button("💾 Salvar Dados do Segurado"):
-                        salvar_processo_com_feedback(
-                            processo_id_selecionado,
-                            p_atual,
-                            "✅ Dados salvos!",
-                        )
-
-            with tab2:
-                st.markdown("### 2. Análise Preliminar de Riscos (APR-HO) & Extemporaneidade")
-                with st.form(f"fp_2_{processo_id_selecionado}"):
-                    v_fis = p_atual.get("apr_fisicos", "")
-                    v_qui = p_atual.get("apr_quimicos", "")
-                    v_bio = p_atual.get("apr_biologicos", "")
-                    p_atual["apr_fisicos"] = st.text_area("Agentes Físicos Presumidos", value=v_fis, height=calcula_altura(v_fis, 80))
-                    p_atual["apr_quimicos"] = st.text_area("Agentes Químicos", value=v_qui, height=calcula_altura(v_qui, 80))
-                    p_atual["apr_biologicos"] = st.text_area("Agentes Biológicos", value=v_bio, height=calcula_altura(v_bio, 80))
-                    
-                    st.markdown("#### Avaliação de Extemporaneidade (Art. 279, IN 128/2022):")
-                    p_atual["extemp_layout"] = st.checkbox("Houve mudança no layout ou organização?", value=p_atual.get("extemp_layout", False))
-                    p_atual["extemp_maquinas"] = st.checkbox("Houve substituição de máquinas?", value=p_atual.get("extemp_maquinas", False))
-                    p_atual["extemp_epc"] = st.checkbox("Houve alteração em EPCs?", value=p_atual.get("extemp_epc", False))
-                    
-                    v_ext = p_atual.get("extemp_justificativa", "")
-                    p_atual["extemp_justificativa"] = st.text_area("Fundamentação de Equivalência", value=v_ext, height=calcula_altura(v_ext, 100))
-
-                    if st.form_submit_button("💾 Salvar APR"):
-                        salvar_processo_com_feedback(
-                            processo_id_selecionado,
-                            p_atual,
-                            "✅ APR salva!",
-                        )
-
-            with tab3:
-                st.markdown("### 3. Planilha de EPIs & Eficácia (Tema 555 STF)")
-                epis_atuais = p_atual.get("quadro_epis", [])
-                df_epis = pd.DataFrame(epis_atuais, columns=["descricao", "ca", "data_entrega", "obs"])
-                edited_df = st.data_editor(
-                    df_epis,
-                    column_config={
-                        "descricao": st.column_config.TextColumn("Descrição do EPI", width="large", required=True),
-                        "ca": st.column_config.TextColumn("C.A.", width="small"),
-                        "data_entrega": st.column_config.TextColumn("Periodicidade / Entrega", width="medium"),
-                        "obs": st.column_config.TextColumn("Eficácia / Tema 555", width="large"),
-                    },
-                    num_rows="dynamic", width="stretch", height=300
-                )
-
-                if st.button("💾 Salvar Tabela de EPIs", key=f"btn_pe_{processo_id_selecionado}"):
-                    df_clean = edited_df.fillna("")
-                    df_clean = df_clean[df_clean["descricao"].astype(str).str.strip() != ""]
-                    p_atual["quadro_epis"] = df_clean.to_dict('records')
-                    salvar_processo_com_feedback(
-                        processo_id_selecionado,
-                        p_atual,
-                        "✅ Planilha salva!",
-                    )
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                with st.form(f"form_prev_epi_{processo_id_selecionado}"):
-                    v_epi = p_atual.get("analise_epis_critica", "")
-                    p_atual["analise_epis_critica"] = st.text_area("Análise Crítica de EPIs", value=v_epi, height=calcula_altura(v_epi, 120))
-                    if st.form_submit_button("💾 Salvar Análise"):
-                        salvar_processo_com_feedback(
-                            processo_id_selecionado,
-                            p_atual,
-                            "✅ Análise salva!",
-                        )
-
-            with tab4:
-                st.markdown("### 4. Metodologia & Enquadramento")
-                with st.form(f"form_prev_4_{processo_id_selecionado}"):
-                    p_atual["enquadramento_legal_prev"] = st.text_input("Enquadramento Legal", value=p_atual.get("enquadramento_legal_prev", ""))
-                    v_met = p_atual.get("doc_ltcat", "")
-                    p_atual["doc_ltcat"] = st.text_area("Metodologia de Avaliação", value=v_met, height=calcula_altura(v_met, 150))
-                    v_conclusao = p_atual.get("conclusao_tecnica", "")
-                    p_atual["conclusao_tecnica"] = st.text_area(
-                        "Conclusão técnica revisada pelo profissional",
-                        value=v_conclusao,
-                        height=calcula_altura(v_conclusao, 150),
-                        help="Não é preenchida automaticamente. Registre a conclusão somente após avaliar os documentos e as evidências do caso.",
-                    )
-                    
-                    if st.form_submit_button("💾 Salvar Metodologia"):
-                        salvar_processo_com_feedback(
-                            processo_id_selecionado,
-                            p_atual,
-                            "✅ Metodologia salva!",
-                        )
-
+            render_extrajudicial(
+                processo_id_selecionado, p_atual,
+                lambda case_id, data: salvar_processo_com_feedback(case_id, data, "✅ Dados salvos!"),
+                parse_pre_relatorio,
+            )
         else:
             tab1, tab2, tab3, tab4, tab5 = st.tabs(["1️⃣ Identificação & Partes", "2️⃣ Contrato & Sínteses", "3️⃣ SST & Documentos", "4️⃣ Planilha de EPIs", "5️⃣ Quesitos"])
             with tab1:
@@ -1481,12 +1398,28 @@ elif opcao == "📄 Gerar Documento Word Final":
         )
         
         st.markdown("<br>", unsafe_allow_html=True)
+        erros_revisao = final_errors(p) if is_prev else []
         p, erros_documento = _normalizar_dados_documento(p)
+        if is_prev:
+            erros_documento.extend(erros_revisao)
+            st.caption("LTCAT e dados de apoio ao PPP: geração manual; não é PPP oficial assinado.")
+            if st.button("📋 Gerar relatório pré-pericial / rascunho",
+                         key=f"extra_{processo_id_selecionado}_preliminar"):
+                try:
+                    draft, warnings = build_extrajudicial_bytes(p, preliminary=True)
+                    for warning in warnings:
+                        st.warning(warning)
+                    st.download_button("📥 Baixar relatório pré-pericial", draft,
+                                       file_name=f"Rascunho_{processo_id_selecionado}.docx",
+                                       mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                except (ValueError, TypeError) as exc:
+                    st.error(f"Não foi possível gerar o rascunho: {exc}")
         for erro_documento in erros_documento:
             st.error(erro_documento)
         if st.button(
-            "📥 Gerar e Baixar Documento Oficial (.docx)",
+            "📥 Gerar LTCAT revisado + apoio PPP (.docx)" if is_prev else "📥 Gerar e Baixar Documento Oficial (.docx)",
             disabled=bool(erros_documento),
+            key=f"gerar_documento_{processo_id_selecionado}",
         ):
             doc = Document()
             for section in doc.sections:
@@ -1561,7 +1494,7 @@ elif opcao == "📄 Gerar Documento Word Final":
             t_main.alignment = WD_ALIGN_PARAGRAPH.CENTER
             t_main.paragraph_format.line_spacing = 1.5
             
-            titulo_doc = "LAUDO TÉCNICO PERICIAL (LTCAT/PPP)" if is_prev else "PRÉ-RELATÓRIO DE ANÁLISE PROCESSUAL E PERICIAL"
+            titulo_doc = "LAUDO TÉCNICO DE CONDIÇÕES AMBIENTAIS DO TRABALHO (LTCAT)" if is_prev else "PRÉ-RELATÓRIO DE ANÁLISE PROCESSUAL E PERICIAL"
             r_t = t_main.add_run(titulo_doc)
             r_t.bold = True
             r_t.font.name = 'Abadi'
@@ -1579,89 +1512,7 @@ elif opcao == "📄 Gerar Documento Word Final":
                 r.font.size = Pt(11)
 
             if is_prev:
-                adicionar_titulo("1. IDENTIFICAÇÃO DO SEGURADO E DA EMPRESA", level=2)
-                add_bullet_inline(doc, "Nome do Segurado", p.get('reclamante_nome', ''))
-                add_bullet_inline(doc, "CPF / NIT / PIS", p.get('reclamante_cpf', ''))
-                add_bullet_inline(doc, "Data de Nascimento", p.get('segurado_nascimento', ''))
-                add_bullet_inline(doc, "Profissão / Cargo", p.get('profissao_cargo', ''))
-                add_bullet_inline(doc, "Razão Social da Empresa", p.get('reclamada_nome', ''))
-                add_bullet_inline(doc, "CNPJ", p.get('reclamada_cnpj', ''))
-                add_bullet_inline(doc, "Setor / Lotação", p.get('setor', ''))
-                add_bullet_inline(doc, "Período Avaliado", p.get('data_admissao', ''))
-
-                adicionar_titulo("2. PROFISSIOGRAFIA E DESCRIÇÃO DAS ATIVIDADES", level=2)
-                add_topic_block(doc, "Relato das Atividades e Rotina Diária", p.get('relato_inicial', ''))
-
-                adicionar_titulo("3. IDENTIFICAÇÃO DOS AGENTES NOCIVOS (DECRETO 3.048/99)", level=2)
-                add_topic_block(doc, "Agentes Físicos", p.get('apr_fisicos', ''))
-                add_topic_block(doc, "Agentes Químicos", p.get('apr_quimicos', ''))
-                add_topic_block(doc, "Agentes Biológicos", p.get('apr_biologicos', ''))
-                add_bullet_inline(doc, "Enquadramento Legal", p.get('enquadramento_legal_prev', ''))
-
-                adicionar_titulo("4. METODOLOGIA E PROCEDIMENTOS DE AVALIAÇÃO (IN 128 / NHO-01)", level=2)
-                add_topic_block(doc, "Critérios Técnicos e Metodológicos", p.get('doc_ltcat', ''))
-
-                adicionar_titulo("5. AVALIAÇÃO DE EXTEMPORANEIDADE (ART. 279 DA IN 128/2022)", level=2)
-                p_ext = doc.add_paragraph()
-                p_ext.paragraph_format.line_spacing = 1.5
-                p_ext.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                p_ext.add_run(f"• Mudança de layout: {'Sim' if p.get('extemp_layout') else 'Não'}\n")
-                p_ext.add_run(f"• Substituição de máquinas: {'Sim' if p.get('extemp_maquinas') else 'Não'}\n")
-                p_ext.add_run(f"• Alteração em EPC: {'Sim' if p.get('extemp_epc') else 'Não'}\n")
-                for run in p_ext.runs:
-                    run.font.name = 'Abadi'
-                    run.font.size = Pt(11)
-                add_topic_block(doc, "Fundamentação de Equivalência", p.get('extemp_justificativa', ''))
-
-                adicionar_titulo("6. MEDIDAS DE PROTEÇÃO E EFICÁCIA DE EPI (TEMA 555 STF)", level=2)
-                quadro_epis = p.get('quadro_epis', [])
-                if quadro_epis:
-                    t_epi = doc.add_table(rows=len(quadro_epis) + 1, cols=4)
-                    definir_largura_tabela_100(t_epi)
-                    headers = ["Descrição do EPI", "C.A.", "Periodicidade", "Observações / Eficácia"]
-                    for h_idx, h_text in enumerate(headers): t_epi.rows[0].cells[h_idx].text = h_text
-                    
-                    for r_idx, epi in enumerate(quadro_epis, start=1):
-                        t_epi.rows[r_idx].cells[0].text = epi.get('descricao', '')
-                        t_epi.rows[r_idx].cells[1].text = epi.get('ca', '')
-                        t_epi.rows[r_idx].cells[2].text = epi.get('data_entrega', '')
-                        t_epi.rows[r_idx].cells[3].text = epi.get('obs', '')
-
-                    for i, row in enumerate(t_epi.rows):
-                        for cell in row.cells:
-                            tcPr = cell._tc.get_or_add_tcPr()
-                            for p_cell in cell.paragraphs:
-                                p_cell.paragraph_format.line_spacing = 1.15
-                                for run in p_cell.runs:
-                                    run.font.name = 'Abadi'
-                                    run.font.size = Pt(8.5)
-                            if i == 0:
-                                shd = parse_xml(r'<w:shd {} w:fill="1B365D"/>'.format(nsdecls('w')))
-                                tcPr.append(shd)
-                                for p_cell in cell.paragraphs:
-                                    for run in p_cell.runs:
-                                        run.font.color.rgb = RGBColor(255, 255, 255)
-                                        run.bold = True
-                            else:
-                                if i % 2 == 0:
-                                    shd = parse_xml(r'<w:shd {} w:fill="F2F2F2"/>'.format(nsdecls('w')))
-                                    tcPr.append(shd)
-                else:
-                    p_sem = doc.add_paragraph("[Nenhum EPI registrado]")
-                    p_sem.paragraph_format.line_spacing = 1.5
-                    p_sem.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                    p_sem.runs[0].font.name = 'Abadi'
-                    p_sem.runs[0].font.size = Pt(11)
-
-                adicionar_linha_vazia()
-                add_topic_block(doc, "Análise Crítica da Eficácia dos EPIs", p.get('analise_epis_critica', ''))
-
-                adicionar_titulo("7. CONCLUSÃO TÉCNICA (LTCAT & DADOS PARA O PPP)", level=2)
-                add_topic_block(
-                    doc,
-                    "Conclusão técnica revisada pelo profissional",
-                    p.get("conclusao_tecnica", ""),
-                )
+                append_extrajudicial(doc, p)
 
             else:
                 adicionar_titulo("1. IDENTIFICAÇÃO DO PROCESSO", level=2)
@@ -1824,7 +1675,7 @@ elif opcao == "📄 Gerar Documento Word Final":
 
             st.toast("✅ Documento Word Finalizado!", icon="📄")
             st.download_button(
-                label="📥 Baixar Documento Oficial (.docx)",
+                label="📥 Baixar LTCAT revisado + apoio PPP (.docx)" if is_prev else "📥 Baixar Documento Oficial (.docx)",
                 data=buffer,
                 file_name=f"Documento_Oficial_{p.get('reclamante_nome','Caso').replace(' ','_')}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"

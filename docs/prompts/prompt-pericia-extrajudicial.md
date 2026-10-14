@@ -1,5 +1,7 @@
 # Prompt: Perícia Extrajudicial Previdenciária (LTCAT + PPP)
 
+> Referência técnica de preenchimento manual. Este arquivo não é carregado pelo aplicativo e não existe integração de IA. O aplicativo organiza dados fornecidos e gera DOCX; não pesquisa profissão, infere riscos comprovados, decide enquadramento ou assina PPP.
+
 ## Contexto
 Especialista em Direito Previdenciário, Engenheiro de Segurança do Trabalho e Perito Sênior com profundo conhecimento em:
 - Decreto 3.048/99 (Anexo IV)
@@ -7,24 +9,24 @@ Especialista em Direito Previdenciário, Engenheiro de Segurança do Trabalho e 
 - NHOs da Fundacentro
 - NR-15
 
-Motor de geração de **Laudos Técnicos das Condições Ambientais de Trabalho (LTCAT)** e **Perfil Profissiográfico Previdenciário (PPP)** extemporâneos e contemporâneos extrajudiciais.
+Orientação para elaboração profissional de **Laudos Técnicos das Condições Ambientais de Trabalho (LTCAT)** e **dados de apoio ao PPP**, extemporâneos e contemporâneos extrajudiciais. O apoio exportado não é PPP oficial assinado.
 
 ## Objetivo
-A partir das informações do usuário (dados básicos, histórico CNIS, profissão, relato inicial), gerar um documento estruturado em duas etapas:
+A partir das informações e evidências registradas pelo usuário (dados básicos, períodos CNIS estruturados, profissão, relato inicial), organizar um documento em duas etapas:
 
-1. **Relatório Pré-Pericial:** Análise de mesa para preparar a estratégia da vistoria
-2. **Roteiro de Vistoria Pericial de Campo (Checklist):** Formulário customizado conforme a profissão
+1. **Relatório Pré-Pericial:** Rascunho de análise de mesa preenchido pelo profissional
+2. **Roteiro de Vistoria Pericial de Campo (Checklist):** Roteiro editável pelo profissional, acompanhado de checklist geral de conferência
 
 ## Diretrizes Principais
 
 ### 1. Personalização Dinâmica
-- Roteiro de Vistoria e Antecipação de Riscos devem ser adaptados à profissão
+- O profissional deve adaptar manualmente o roteiro e a antecipação de riscos à profissão; não há personalização automática
 - **Exemplo Mecânico:** Óleos minerais, hidrocarbonetos, solventes, ruído
 - **Exemplo Dentista:** Agentes biológicos, produtos químicos odontológicos (resinas, ácidos), radiação não ionizante
 
 ### 2. Rigor Técnico e Legal
 - Incorpore requisitos do Art. 279 da IN 128/2022 (extemporaneidade)
-- Comprovação de mudanças: layout, máquinas, EPC
+- Comprovação de mudanças: layout, máquinas, EPC; usar **Não informado** quando a evidência não permitir responder
 - Critério de equivalência: condição atual reflete a época do labor?
 
 ### 3. Tema 555 do STF
@@ -55,7 +57,7 @@ A partir das informações do usuário (dados básicos, histórico CNIS, profiss
 
 ### 3. ANÁLISE PRELIMINAR DE RISCOS (APR-HO) E PROFISSIOGRAFIA PRESUMIDA
 - **Atividades Típicas Presumidas:** Descrição técnica da rotina esperada conforme relato
-- **Agentes Físicos:** Listar prováveis agentes (ex: ruído). Metodologia esperada (ex: NHO-01, q=5)
+- **Agentes Físicos:** Listar agentes presumidos (ex.: ruído), separados dos observados. O profissional deve definir metodologia e parâmetros conforme a norma e o período; não confundir critérios NHO-01 com NR-15.
 - **Agentes Químicos:** Listar prováveis agentes. Indicar se análise é qualitativa (LINACH/Anexo 13) ou quantitativa (Anexo 11)
 - **Agentes Biológicos:** Se aplicável à profissão, detalhar fontes de exposição
 - **Possível Enquadramento Legal:** Códigos do Decreto 53.831/64, 83.080/79 e 3.048/99
@@ -80,11 +82,11 @@ A partir das informações do usuário (dados básicos, histórico CNIS, profiss
 - Cargo do Acompanhante: ___________________________________________________________
 
 ### 2. AVALIAÇÃO DE EXTEMPORANEIDADE (Art. 279 da IN 128/2022)
-**As condições atuais refletem a época do labor? - Respostas "Não" embasam o laudo extemporâneo**
+**As condições atuais refletem a época do labor?** Nenhuma resposta isolada comprova equivalência. Comparar documentos, datas, fontes e limitações por período. Ausência de informação não significa ausência de mudanças.
 
-- [ ] Houve mudança no layout ou organização do ambiente? ( ) Sim ( ) Não
-- [ ] Houve substituição de máquinas ou equipamentos? ( ) Sim ( ) Não
-- [ ] Houve adoção ou alteração nas tecnologias de proteção coletiva (EPC)? ( ) Sim ( ) Não
+- [ ] Houve mudança no layout ou organização do ambiente? ( ) Sim ( ) Não ( ) Não informado
+- [ ] Houve substituição de máquinas ou equipamentos? ( ) Sim ( ) Não ( ) Não informado
+- [ ] Houve adoção ou alteração nas tecnologias de proteção coletiva (EPC)? ( ) Sim ( ) Não ( ) Não informado
 - [ ] Os níveis de ação da legislação trabalhista foram alcançados? ( ) Sim ( ) Não
 
 **Justificativas:** ____________________________________________________________________
@@ -101,7 +103,7 @@ A partir das informações do usuário (dados básicos, histórico CNIS, profiss
 - Agente Identificado: ___________________ | Fonte Geradora: _______________________
 - Equipamento de Medição (Marca/Modelo/Nº Série): ________________________________
 - Data do Certificado de Calibração: ____/____/____
-- Metodologia Aplicada (Ex: NHO-01, q=5): ________________________________________
+- Metodologia e parâmetros aplicados, justificados conforme norma/período: ___________
 - Nível Encontrado (NEN / Lavg): ____________ dB(A) | Tempo de Exposição: ____________
 
 **4.2. Agentes Químicos**
@@ -149,14 +151,14 @@ O LTCAT deve conter os 12 elementos informativos básicos do Art. 276 da IN 128/
 6. **Localização das Fontes Geradoras:** Equipamentos, máquinas, produtos químicos específicos
 7. **Via e Periodicidade de Exposição:** Habitual, permanente (não ocasional). Vias de absorção.
 8. **Metodologia e Procedimentos de Avaliação:**
-   - **Ruído:** NHO-01 Fundacentro, NEN, ponderação "A", resposta SLOW, q=5
+   - **Ruído:** Registrar técnica, equipamento, calibração e parâmetros efetivamente utilizados; distinguir critérios NHO-01 e NR-15 e sua pertinência ao período.
    - **Químicos:** Qualitativa (LINACH/Anexo XIII NR-15) ou Quantitativa (Anexo 11)
 9. **Medidas de Proteção (EPC e EPI):**
    - Descrever EPCs existentes
    - Analisar eficácia dos EPIs conforme Tema 555 STF e Súmula 9 TNU
    - Informar CA, periodicidade de troca, se neutraliza o risco
-10. **Conclusão Técnica:** Parecer conclusivo sobre enquadramento como atividade especial
-11. **Fundamentação de Extemporaneidade (se aplicável):** Declaração técnica de manutenção de condições
+10. **Conclusão Técnica:** Texto fundamentado do profissional, inclusive resultado negativo ou inconclusivo; nunca preenchido automaticamente
+11. **Fundamentação de Extemporaneidade (se aplicável):** Evidências históricas, comparação de condições e limitações; não presumir manutenção
 12. **Enquadramento do Assinante:** Engenheiro de Segurança (CREA + ART) ou Médico do Trabalho (CRM)
 
 ### SEÇÃO B: DADOS ESTRUTURADOS PARA O PPP
@@ -176,7 +178,10 @@ O LTCAT deve conter os 12 elementos informativos básicos do Art. 276 da IN 128/
 
 ## Exemplo de Uso
 
-1. Usuário insere dados básicos (Nome, CPF, Profissão, Histórico CNIS)
-2. Sistema gera Relatório Pré-Pericial com APR-HO e Roteiro de Vistoria customizado
-3. Perito preenche Roteiro in loco
-4. Sistema processa informações e gera LTCAT + PPP prontos para protocolo
+1. Usuário registra identificação, períodos CNIS, APR presumida e roteiro manual.
+2. Profissional registra vistoria, fontes, agentes observados, avaliações ambientais por período, EPC/EPI e comparação histórica.
+3. Salva rascunhos; pode gerar relatório pré-pericial/checklist sem aprovação.
+4. Escreve metodologia e conclusão, salva e registra revisão explícita dos dados salvos.
+5. Gera LTCAT com vistoria e fotos, mais dados estruturados de apoio ao PPP. Emissão/assinatura do PPP oficial e protocolo permanecem fora do aplicativo.
+
+Importações DOCX/CSV/JSON exigem revisão antes de aplicar; JSON e DOCX estruturados permitem reimportação dos campos reconhecidos, sem fotos/IDs/revisão. Alterações nas evidências invalidam a aprovação. Para esquemas exatos e limitações, consulte [Configuração local](../configuracao-local.md).

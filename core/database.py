@@ -9,6 +9,7 @@ from core.config import (
     criar_dados_padrao_persistencia,
     obter_credenciais_firebase,
 )
+from core.extrajudicial import defaults_for_existing
 
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,12 @@ def carregar_dados():
         revisoes_sessao = st.session_state.setdefault("_process_revision_snapshot", {})
         for doc in docs:
             valor_doc = doc.to_dict() or {}
+            padrao_caso = dados_padrao
+            if "Previdenciário" in str(valor_doc.get("modulo_atuacao", "")):
+                padrao_caso = {**dados_padrao, **defaults_for_existing(valor_doc)}
             revisao_atual = int(valor_doc.get("_revision", 0) or 0)
             revisao_esperada = revisoes_sessao.setdefault(doc.id, revisao_atual)
-            for chave, valor_padrao in dados_padrao.items():
+            for chave, valor_padrao in padrao_caso.items():
                 if chave not in valor_doc:
                     valor_doc[chave] = valor_padrao
             valor_doc["_revision"] = revisao_esperada
@@ -93,6 +97,8 @@ def _normalizar_dados_processo(dados_proc):
         raise ValueError("Os dados do processo devem ser um dicionário.")
 
     dados_normalizados = criar_dados_padrao_persistencia()
+    if "Previdenciário" in str(dados_proc.get("modulo_atuacao", "")):
+        dados_normalizados.update(defaults_for_existing(dados_proc))
     dados_normalizados.update(dados_proc)
     return dados_normalizados
 
