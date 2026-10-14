@@ -14,7 +14,8 @@ import streamlit as st
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
-from core import database
+from core import database, photo_storage
+from core.campo_fotos import foto_hash
 from core.config import criar_dados_padrao
 from core.extrajudicial import evidence_hash, new_defaults
 
@@ -53,6 +54,22 @@ class IntegridadeAppTests(unittest.TestCase):
         self.falhar_gravacao = False
         self.uploads = {}
         self.cameras = {}
+        self.objetos_storage = {}
+        self.bucket = mock.Mock()
+        self.blobs = {}
+        photo_storage._baixar_foto_storage.clear()
+        self.addCleanup(photo_storage._baixar_foto_storage.clear)
+
+        def blob(path):
+            if path not in self.blobs:
+                objeto = mock.Mock()
+                objeto.exists.side_effect = lambda **kw: path in self.objetos_storage
+                objeto.upload_from_string.side_effect = lambda dados, **kw: self.objetos_storage.update({path: dados})
+                objeto.download_as_bytes.side_effect = lambda **kw: self.objetos_storage[path]
+                self.blobs[path] = objeto
+            return self.blobs[path]
+
+        self.bucket.blob.side_effect = blob
 
         def salvar(processo_id, dados):
             if self.falhar_gravacao:
@@ -71,6 +88,7 @@ class IntegridadeAppTests(unittest.TestCase):
             mock.patch.object(database, "carregar_dados",
                               side_effect=lambda: copy.deepcopy(self.processos)),
             mock.patch.object(database, "salvar_processo", side_effect=salvar),
+            mock.patch.object(photo_storage, "_obter_bucket", return_value=self.bucket),
             mock.patch.object(st, "file_uploader", side_effect=file_uploader),
             mock.patch.object(st, "camera_input", side_effect=camera_input),
         ):
@@ -231,7 +249,8 @@ class IntegridadeAppTests(unittest.TestCase):
         self._enviar(app, "Proc_01", verde, vermelho, amarelo)
         fotos = self.processos["Proc_01"]["campo_fotos"]
         self.assertEqual(len(fotos), 4)
-        self.assertEqual(len({f["base64"] for f in fotos}), 4)
+        self.assertEqual(len({foto_hash(f) for f in fotos}), 4)
+        self.assertTrue(all("base64" not in f and f.get("storage_path") for f in fotos))
         self.assertEqual(fotos[0]["legenda"], "Fachada")
         self.assertEqual(self._versao(app, "Proc_01"), 2)
         self.assertEqual([t.value for t in app.text_input if t.label == "Legenda 1"], ["Fachada"])
@@ -267,7 +286,7 @@ class IntegridadeAppTests(unittest.TestCase):
         fotos = self.processos["Proc_01"]["campo_fotos"]
         self.assertEqual(len(fotos), 4)
         self.assertEqual(fotos[0], criar_foto(_Arquivo("black").getvalue()))
-        self.assertEqual(len({f["base64"] for f in fotos}), 4)
+        self.assertEqual(len({foto_hash(f) for f in fotos}), 4)
         self.assertEqual(self.gravacoes, ["Proc_01", "Proc_01"])
 
         # Estado de abertura é por caso e o local de armazenamento é explícito.
@@ -287,6 +306,24 @@ class IntegridadeAppTests(unittest.TestCase):
         self.cameras["camera_Proc_01_1"] = _Arquivo("blue")
         app.run()
         self.assertEqual(len(self.processos["Proc_01"]["campo_fotos"]), 2)
+
+    def test_word_da_tela_inclui_storage_e_base64_legado(self):
+        from docx import Document
+        from core.campo_fotos import criar_foto
+
+        self.processos["Proc_01"]["campo_fotos"] = [criar_foto(_Arquivo("blue").getvalue())]
+        app = self._app()
+        self._ir_campo(app)
+        app.button(key="fotos_adicionar_Proc_01").click().run()
+        self._enviar(app, "Proc_01", _Arquivo("red"))
+        [b for b in app.sidebar.button if "Gerar Documento Word" in b.label][0].click().run()
+        with mock.patch.object(st, "download_button") as download:
+            app.button(key="gerar_documento_Proc_01").click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.warning)
+        documento = Document(download.call_args.kwargs["data"])
+        self.assertEqual(sum("Figura" in p.text for p in documento.paragraphs), 2)
+        self.assertGreaterEqual(len(documento.inline_shapes), 2)
 
     def test_excluir_foto_persiste_e_legendas_seguem_a_foto(self):
         app = self._app()
@@ -326,6 +363,46 @@ class IntegridadeAppTests(unittest.TestCase):
         self.assertEqual(len(self.processos["Proc_01"]["campo_fotos"]), 2)
         self.assertNotIn("Proc_01", app.session_state["fotos_pendentes"])
         self.assertEqual(len(self.processos["Proc_02"]["campo_fotos"]), 1)
+        self.assertTrue(all(blob.upload_from_string.call_count == 1 for blob in self.blobs.values()))
+
+    def test_falha_parcial_storage_salva_so_sucessos_e_preserva_restantes(self):
+        app = self._app()
+        self._ir_campo(app)
+        obter_blob = self.bucket.blob.side_effect
+        tentativas = 0
+
+        def falhar_segunda(path):
+            nonlocal tentativas
+            tentativas += 1
+            if tentativas == 2:
+                raise RuntimeError("offline")
+            return obter_blob(path)
+
+        self.bucket.blob.side_effect = falhar_segunda
+        self._enviar(app, "Proc_01", _Arquivo("red"), _Arquivo("blue"))
+        self.assertEqual(len(self.processos["Proc_01"]["campo_fotos"]), 1)
+        self.assertEqual(len(app.session_state["fotos_pendentes"]["Proc_01"]), 1)
+        self.assertTrue(any("Falha no Storage" in info.value for info in app.info))
+        self.bucket.blob.side_effect = obter_blob
+        app.button(key="fotos_reenviar_Proc_01").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(self.processos["Proc_01"]["campo_fotos"]), 2)
+        self.assertNotIn("Proc_01", app.session_state["fotos_pendentes"])
+
+    def test_recarregar_deduplica_pendente_ja_confirmada_na_nuvem(self):
+        app = self._app()
+        self._ir_campo(app)
+        self.falhar_gravacao = True
+        self._enviar(app, "Proc_01", _Arquivo("red"))
+        pendente = app.session_state["fotos_pendentes"]["Proc_01"][0]
+        self.processos["Proc_01"]["campo_fotos"] = [photo_storage.enviar_foto("Proc_01", pendente)]
+        self.falhar_gravacao = False
+        app.button(key="fotos_recarregar_Proc_01").click().run()
+        app.button(key="fotos_reenviar_Proc_01").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(self.processos["Proc_01"]["campo_fotos"]), 1)
+        self.assertEqual(self.gravacoes, [])
+        self.assertNotIn("Proc_01", app.session_state["fotos_pendentes"])
 
     def test_limite_do_documento_e_comunicado_e_pendentes_mantidas(self):
         self.processos["Proc_01"]["campo_medicoes"] = "x" * 999_900
@@ -335,6 +412,7 @@ class IntegridadeAppTests(unittest.TestCase):
         self.assertEqual(self.gravacoes, [])
         self.assertTrue(any("Limite de armazenamento" in e.value for e in app.main.error))
         self.assertEqual(len(app.session_state["fotos_pendentes"]["Proc_01"]), 1)
+        self.bucket.blob.assert_not_called()
 
     def test_recarregar_versao_da_nuvem_mantem_pendentes(self):
         app = self._app()

@@ -108,9 +108,9 @@ def append_extrajudicial(doc, data, preliminary=False):
 
 
 def build_extrajudicial_bytes(data, preliminary=False):
-    import base64
     import io
     from pathlib import Path
+    from core.photo_storage import resolver_bytes_foto
 
     errors = validate(data) if preliminary else final_errors(data)
     if errors:
@@ -125,7 +125,7 @@ def build_extrajudicial_bytes(data, preliminary=False):
     warnings = []
     for index, photo in enumerate(data.get("campo_fotos", []), 1):
         try:
-            doc.add_picture(io.BytesIO(base64.b64decode(photo["base64"], validate=True)), width=Inches(4.5))
+            doc.add_picture(io.BytesIO(resolver_bytes_foto(photo)), width=Inches(4.5))
             doc.add_paragraph(f"Figura {index}: {text(photo.get('legenda'))} {text(photo.get('gps'))}")
         except Exception as exc:
             warnings.append(f"Foto {index} não incluída: {exc}")

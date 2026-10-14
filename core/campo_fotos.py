@@ -3,19 +3,33 @@
 import base64
 import hashlib
 import json
+from pathlib import Path
 
 
-# Limite documentado do Firestore para um único documento (1 MiB). As fotos
-# ficam embutidas (base64) no documento do caso, por isso há um teto real de
-# armazenamento por caso. O orçamento abaixo deixa margem para metadados.
+# Limite do documento: textos, referências e fotos legadas em base64.
+# Os bytes de fotos novas ficam no Storage. O orçamento deixa margem.
 FIRESTORE_DOC_LIMIT_BYTES = 1_048_576
 DOC_SIZE_BUDGET_BYTES = 1_000_000
 LEGENDA_PADRAO = "Registro fotográfico."
 
 
 def foto_hash(foto):
-    base64_value = foto.get("base64", "") if isinstance(foto, dict) else ""
-    return hashlib.sha256(str(base64_value).encode("utf-8")).hexdigest()
+    if not isinstance(foto, dict):
+        foto = {}
+    if foto.get("base64"):
+        try:
+            dados = base64.b64decode(foto["base64"], validate=True)
+        except (ValueError, TypeError):
+            dados = str(foto["base64"]).encode("utf-8")
+        return hashlib.sha256(dados).hexdigest()
+    if foto.get("hash"):
+        return foto["hash"]
+    if foto.get("path"):
+        try:
+            return hashlib.sha256(Path(foto["path"]).read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return hashlib.sha256(str(foto.get("storage_path") or foto.get("path", "")).encode("utf-8")).hexdigest()
 
 
 def ids_fotos(fotos):
@@ -40,15 +54,16 @@ def criar_foto(bytes_imagem, gps=""):
 
 def adicionar_pendentes(salvas, pendentes, novas):
     """Inclui novas fotos na fila sem duplicar fotos salvas ou já pendentes."""
-    conhecidas = {f.get("base64") for f in list(salvas or []) + list(pendentes or [])
+    conhecidas = {foto_hash(f) for f in list(salvas or []) + list(pendentes or [])
                   if isinstance(f, dict)}
     fila = list(pendentes or [])
     adicionadas = duplicadas = 0
     for foto in novas:
-        if foto.get("base64") in conhecidas:
+        identidade = foto_hash(foto)
+        if identidade in conhecidas:
             duplicadas += 1
             continue
-        conhecidas.add(foto.get("base64"))
+        conhecidas.add(identidade)
         fila.append(foto)
         adicionadas += 1
     return fila, adicionadas, duplicadas
@@ -73,11 +88,13 @@ def separar_por_limite(dados_base, pendentes, limite=DOC_SIZE_BUDGET_BYTES):
 
 
 def resumo_armazenamento(dados_caso, pendentes=None, limite=DOC_SIZE_BUDGET_BYTES):
-    """Situação das fotos do caso: salvas no registro (nuvem) x pendentes na sessão."""
+    """Conta referências/legado e estima o documento, sem bytes novos do Storage."""
     dados_caso = dados_caso or {}
     usados = estimar_tamanho_documento(dados_caso)
     return {
         "salvas": len(list(dados_caso.get("campo_fotos", []) or [])),
+        "storage": sum(bool(f.get("storage_path")) for f in dados_caso.get("campo_fotos", []) or []),
+        "legadas": sum(not f.get("storage_path") for f in dados_caso.get("campo_fotos", []) or []),
         "pendentes": len(list(pendentes or [])),
         "bytes_usados": usados,
         "bytes_limite": limite,

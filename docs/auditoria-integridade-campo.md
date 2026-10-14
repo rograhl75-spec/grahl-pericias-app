@@ -51,6 +51,12 @@ produção foi lido, alterado ou migrado.
 - Correção: as chaves agora usam a identidade da foto (hash do conteúdo + ocorrência).
 
 ### 1.5 Limite de 1 MB por documento (limite legítimo, comunicado)
+**Atualização — migração para Storage:** os achados abaixo descrevem o modelo anterior.
+Agora fotos novas ficam no bucket privado; somente referências/metadados vão ao Firestore.
+Base64/path legados permanecem legíveis, sem migração destrutiva. O limite de 1 MiB ainda vale
+para textos, metadados e base64 legado. Configuração, custos, falhas e retenção estão em
+`docs/configuracao-local.md`, seção **Firebase Storage (fotos novas)**.
+
 - As fotos ficam em base64 **dentro** do documento do caso no Firestore, que aceita no máximo
   1 MiB por documento. Medição local de `comprimir_imagem`: até cerca de 90 KB por foto de
   textura densa (cerca de 120 KB em base64). Isso permite aproximadamente 8 a 15 fotos por caso,
@@ -92,7 +98,7 @@ produção foi lido, alterado ou migrado.
 | `ui/extrajudicial.py` formulário | Médio | Mesmo comportamento: o rascunho só é preservado ao clicar em Salvar. As chaves já usam o prefixo `extra_{id}_` (isolado). |
 | `core/database.carregar_dados` | Médio | A revisão esperada fica fixa por sessão. Se o caso for alterado em outro aparelho, as gravações são recusadas até recarregar a página ou usar o botão de recarga (só existe na área de fotos pendentes). |
 | `core/database.salvar_processo` | Médio | Grava o documento inteiro (`transaction.set`). Edições simultâneas são barradas pela revisão, mas não são mescladas. |
-| Limite de 1 MiB | Alto (operacional) | Ver 1.5. É necessária uma decisão de arquitetura. |
+| Limite de 1 MiB | Operacional | Fotos novas agora usam Storage; documento com textos, metadados e fotos legadas ainda precisa caber. Ver atualização em 1.5. |
 | `components.v1.html` | Baixo | O Streamlit avisa que essa API foi descontinuada (prazo informado: 2026-06-01). O rascunho local, a voz e o GPS dependem dela. |
 | `comprimir_imagem` | Baixo | Não aplica a orientação EXIF; fotos de celular podem ficar giradas. |
 | `grahl_app/` | Informativo | É um pacote auxiliar usado só nos testes, não pelo `app.py`. |
