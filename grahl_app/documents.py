@@ -215,59 +215,16 @@ def _build_judicial_document(doc: Document, process: dict) -> None:
 
 
 def _build_previdenciario_document(doc: Document, process: dict) -> None:
-    _add_title(doc, "1. IDENTIFICAÇÃO DO SEGURADO E DA EMPRESA", level=2)
-    _add_bullet_inline(doc, "Nome do Segurado", process.get("reclamante_nome", ""))
-    _add_bullet_inline(doc, "CPF / NIT / PIS", process.get("reclamante_cpf", ""))
-    _add_bullet_inline(doc, "Data de Nascimento", process.get("segurado_nascimento", ""))
-    _add_bullet_inline(doc, "Profissão / Cargo", process.get("profissao_cargo", ""))
-    _add_bullet_inline(doc, "Razão Social da Empresa", process.get("reclamada_nome", ""))
-    _add_bullet_inline(doc, "CNPJ", process.get("reclamada_cnpj", ""))
-    _add_bullet_inline(doc, "Setor / Lotação", process.get("setor", ""))
-    _add_bullet_inline(doc, "Período Avaliado", process.get("data_admissao", ""))
+    from core.extrajudicial_document import append_extrajudicial
 
-    _add_title(doc, "2. PROFISSIOGRAFIA E DESCRIÇÃO DAS ATIVIDADES", level=2)
-    _add_topic_block(doc, "Relato das Atividades e Rotina Diária", process.get("relato_inicial", ""))
-
-    _add_title(doc, "3. IDENTIFICAÇÃO DOS AGENTES NOCIVOS (DECRETO 3.048/99)", level=2)
-    _add_topic_block(doc, "Agentes Físicos", process.get("apr_fisicos", ""))
-    _add_topic_block(doc, "Agentes Químicos", process.get("apr_quimicos", ""))
-    _add_topic_block(doc, "Agentes Biológicos", process.get("apr_biologicos", ""))
-    _add_bullet_inline(doc, "Enquadramento Legal", process.get("enquadramento_legal_prev", ""))
-
-    _add_title(doc, "4. METODOLOGIA E PROCEDIMENTOS DE AVALIAÇÃO (IN 128 / NHO-01)", level=2)
-    _add_topic_block(doc, "Critérios Técnicos e Metodológicos", process.get("doc_ltcat", ""))
-
-    _add_title(doc, "5. AVALIAÇÃO DE EXTEMPORANEIDADE (ART. 279 DA IN 128/2022)", level=2)
-    paragraph = _new_paragraph(doc)
-    for line in (
-        f"• Mudança de layout: {'Sim' if process.get('extemp_layout') else 'Não'}\n",
-        f"• Substituição de máquinas: {'Sim' if process.get('extemp_maquinas') else 'Não'}\n",
-        f"• Alteração em EPC: {'Sim' if process.get('extemp_epc') else 'Não'}\n",
-    ):
-        _apply_run_style(paragraph.add_run(line))
-    _add_topic_block(doc, "Fundamentação de Equivalência", process.get("extemp_justificativa", ""))
-
-    _add_title(doc, "6. MEDIDAS DE PROTEÇÃO E EFICÁCIA DE EPI (TEMA 555 STF)", level=2)
-    _add_epi_table(
-        doc,
-        process.get("quadro_epis", []),
-        periodicity_label="Periodicidade",
-        empty_message="[Nenhum EPI registrado]",
-        observations_label="Observações / Eficácia",
-    )
-    _add_blank_line(doc)
-    _add_topic_block(doc, "Análise Crítica da Eficácia dos EPIs", process.get("analise_epis_critica", ""))
-
-    _add_title(doc, "7. CONCLUSÃO TÉCNICA (LTCAT & DADOS PARA O PPP)", level=2)
-    paragraph = _new_paragraph(doc)
-    _apply_run_style(
-        paragraph.add_run(
-            "Conclui-se que as atividades desenvolvidas pelo segurado expuseram-no de forma habitual e permanente aos agentes nocivos acima descritos, preenchendo os requisitos legais para o reconhecimento do tempo de serviço especial."
-        )
-    )
+    append_extrajudicial(doc, process)
 
 
 def build_document_bytes(process_data: dict) -> tuple[io.BytesIO, list[str]]:
+    if "Previdenciário" in safe_str(process_data.get("modulo_atuacao")):
+        from core.extrajudicial_document import build_extrajudicial_bytes
+
+        return build_extrajudicial_bytes(process_data)
     process = normalize_process_data(process_data)
     warnings: list[str] = []
     document = Document()
