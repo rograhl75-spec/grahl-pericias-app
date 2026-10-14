@@ -26,11 +26,10 @@ from core.database import (
     estimar_proximo_id_local,
 )
 from core.campo_fotos import (
-    DOC_SIZE_BUDGET_BYTES,
     adicionar_pendentes,
     criar_foto,
-    estimar_tamanho_documento,
     ids_fotos,
+    resumo_armazenamento,
     separar_por_limite,
 )
 from core.field_records import (
@@ -94,6 +93,15 @@ def _descartar_rascunho_campo(processo_id: str) -> None:
 
 def _descartar_fotos_pendentes(processo_id: str) -> None:
     st.session_state.setdefault("fotos_pendentes", {}).pop(processo_id, None)
+
+
+def _painel_fotos_key(processo_id: str) -> str:
+    return f"fotos_adicionar_aberto_{processo_id}"
+
+
+def _alternar_painel_fotos(processo_id: str) -> None:
+    chave = _painel_fotos_key(processo_id)
+    st.session_state[chave] = not st.session_state.get(chave, False)
 
 
 def _recarregar_caso(processo_id: str) -> None:
@@ -1350,57 +1358,87 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         """, height=95)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("#### 📸 Captura de Evidências Fotográficas")
+        st.markdown("#### 📸 Fotos do Caso")
 
         fotos_salvas = list(p_salvo.get("campo_fotos", []) or [])
         pendentes = list(st.session_state.fotos_pendentes.get(caso_id, []))
         versao_key = f"fotos_widget_versao_{caso_id}"
         versao_fotos = st.session_state.get(versao_key, 0)
         aviso_fotos_key = f"fotos_aviso_{caso_id}"
+        painel_fotos_key = _painel_fotos_key(caso_id)
+        if painel_fotos_key not in st.session_state:
+            # Caso sem fotos já abre a área de adição; com fotos, ela é aberta pelo botão.
+            st.session_state[painel_fotos_key] = not fotos_salvas
         if st.session_state.get(aviso_fotos_key):
             st.info(st.session_state.pop(aviso_fotos_key))
 
-        tamanho_caso = estimar_tamanho_documento(p_salvo)
-        st.caption(
-            f"Armazenamento deste caso: {tamanho_caso / 1024:.0f} KB de ~{DOC_SIZE_BUDGET_BYTES / 1024:.0f} KB "
-            "(as fotos ficam guardadas dentro do registro do caso)."
-        )
-        if tamanho_caso > 0.85 * DOC_SIZE_BUDGET_BYTES:
+        resumo_fotos = resumo_armazenamento(p_salvo, pendentes)
+        with st.container(border=True):
+            st.markdown(
+                f"**📍 Onde ficam as fotos:** dentro do registro do caso **{caso_id}** na nuvem "
+                f"(banco Firestore › coleção `processos` › documento `{caso_id}` › campo `campo_fotos`). "
+                "Não existe pasta separada no aparelho: depois de salvas, as fotos acompanham o caso "
+                "em qualquer dispositivo e entram no Documento Word final."
+            )
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("☁️ Salvas na nuvem", resumo_fotos["salvas"])
+            col_m2.metric("⏳ Pendentes (só nesta sessão)", resumo_fotos["pendentes"])
+            col_m3.metric(
+                "💾 Espaço do caso",
+                f"{resumo_fotos['bytes_usados'] / 1024:.0f} / {resumo_fotos['bytes_limite'] / 1024:.0f} KB",
+            )
+            st.progress(
+                resumo_fotos["fracao_usada"],
+                text=f"{resumo_fotos['fracao_usada'] * 100:.0f}% do limite de armazenamento do caso (~1 MB por documento do banco)",
+            )
+            st.caption(
+                "Fotos pendentes ficam apenas na memória desta sessão do navegador até serem gravadas "
+                "no caso; se a página for fechada ou recarregada antes disso, elas se perdem."
+            )
+        if resumo_fotos["fracao_usada"] > 0.85:
             st.warning(
                 "O caso está próximo do limite de armazenamento por documento do banco. "
                 "Novas fotos podem não caber; exclua fotos desnecessárias deste caso se preciso."
             )
 
-        # Widgets de captura com chave por caso + versão: após mover os arquivos para a
-        # fila de pendentes a versão muda, liberando a captura para o próximo ciclo.
-        img_camera = st.camera_input(
-            "📷 Câmera Web (Apenas para Computador)", key=f"camera_{caso_id}_{versao_fotos}"
+        st.markdown("---")
+        st.markdown(f"#### 🖼️ Gerenciar Fotos ({len(fotos_salvas)} fotos salvas na nuvem):")
+
+        # Botão grande, fora dos cartões das imagens, que abre/fecha a área de adição.
+        painel_fotos_aberto = st.session_state[painel_fotos_key]
+        st.markdown(
+            f"<style>.st-key-fotos_adicionar_{caso_id} button {{min-height: 3.5rem;}}"
+            f".st-key-fotos_adicionar_{caso_id} button p {{font-size: 1.2rem; font-weight: 700;}}</style>",
+            unsafe_allow_html=True,
+        )
+        st.button(
+            "✖️ Fechar área de adição de fotos" if painel_fotos_aberto else "➕ Adicionar novas fotos",
+            key=f"fotos_adicionar_{caso_id}",
+            type="secondary" if painel_fotos_aberto else "primary",
+            width="stretch",
+            on_click=_alternar_painel_fotos, args=(caso_id,),
+            help=f"Adiciona fotos ao caso {caso_id}. Cada lote é gravado no registro do caso na nuvem.",
         )
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("---")
-
-        col_up1, col_up2 = st.columns([3, 1])
-        with col_up1:
-            fotos_upload = st.file_uploader(
-                "📸 CÂMERA DO TABLET (Traseira c/ Zoom) ou Galeria", type=["jpg", "jpeg", "png"],
-                accept_multiple_files=True, key=f"fotos_upload_{caso_id}_{versao_fotos}",
-            )
-        with col_up2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            confirmar_limpeza = st.checkbox(
-                f"Confirmo excluir todas as fotos do caso {caso_id}",
-                key=f"fotos_limpar_confirmar_{caso_id}",
-                disabled=not fotos_salvas,
-            )
-            if st.button("🗑️ Limpar Todas Fotos", key=f"fotos_limpar_{caso_id}",
-                         disabled=not (confirmar_limpeza and fotos_salvas)):
-                candidato_fotos = copy.deepcopy(p_salvo)
-                candidato_fotos["campo_fotos"] = []
-                if salvar_processo(caso_id, candidato_fotos):
-                    st.rerun()
-                else:
-                    st.error("❌ Não foi possível limpar as fotos.")
+        img_camera = None
+        fotos_upload = None
+        if painel_fotos_aberto:
+            with st.container(border=True):
+                st.markdown(f"##### ➕ Adicionar fotos ao caso {caso_id}")
+                st.caption(
+                    "Selecione uma ou várias fotos de uma vez. Cada lote é gravado automaticamente "
+                    f"no registro do caso {caso_id} na nuvem; após salvar, esta área continua aberta "
+                    "para o próximo lote — as fotos já salvas permanecem na galeria abaixo."
+                )
+                # Widgets de captura com chave por caso + versão: após mover os arquivos para a
+                # fila de pendentes a versão muda, liberando a captura para o próximo ciclo.
+                fotos_upload = st.file_uploader(
+                    "📸 CÂMERA DO TABLET (Traseira c/ Zoom) ou Galeria", type=["jpg", "jpeg", "png"],
+                    accept_multiple_files=True, key=f"fotos_upload_{caso_id}_{versao_fotos}",
+                )
+                img_camera = st.camera_input(
+                    "📷 Câmera Web (Apenas para Computador)", key=f"camera_{caso_id}_{versao_fotos}"
+                )
 
         arquivos_novos = ([img_camera] if img_camera is not None else []) + list(fotos_upload or [])
         salvar_pendentes_agora = False
@@ -1412,6 +1450,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
             pendentes, adicionadas, duplicadas = adicionar_pendentes(fotos_salvas, pendentes, novas_fotos)
             st.session_state.fotos_pendentes[caso_id] = pendentes
             st.session_state[versao_key] = versao_fotos + 1
+            st.session_state[painel_fotos_key] = True
             if duplicadas:
                 st.session_state[aviso_fotos_key] = (
                     f"{duplicadas} foto(s) ignorada(s) por já estarem cadastradas neste caso."
@@ -1424,7 +1463,7 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
         if pendentes:
             st.warning(
                 f"⚠️ {len(pendentes)} foto(s) aguardando gravação no caso {caso_id} — "
-                "ainda NÃO salvas na nuvem. Elas não são enviadas para outros casos."
+                "ainda NÃO salvas na nuvem (só nesta sessão). Elas não são enviadas para outros casos."
             )
             cols_pend = st.columns(min(len(pendentes), 4))
             for indice_pend, foto_pend in enumerate(pendentes):
@@ -1473,10 +1512,8 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         "use “Tentar salvar fotos pendentes”."
                     )
 
-        st.markdown("<br>---<br>", unsafe_allow_html=True)
-        col_ger, col_btn_geral = st.columns([2, 1])
-        with col_ger: st.markdown(f"#### 🖼️ Gerenciar Fotos ({len(fotos_salvas)} fotos):")
-        with col_btn_geral:
+        col_gps, col_limpar = st.columns(2)
+        with col_gps:
             if st.button("⚡ Salvar GPS em Todas as Fotos", key=f"fotos_gps_todas_{caso_id}"):
                 if gps_caso and fotos_salvas:
                     candidato_fotos = copy.deepcopy(p_salvo)
@@ -1485,7 +1522,20 @@ elif opcao == "🚜 Diligência de Campo & Fotos":
                         st.rerun()
                     else:
                         st.error("❌ Não foi possível atualizar o GPS das fotos.")
-
+        with col_limpar:
+            confirmar_limpeza = st.checkbox(
+                f"Confirmo excluir todas as fotos do caso {caso_id}",
+                key=f"fotos_limpar_confirmar_{caso_id}",
+                disabled=not fotos_salvas,
+            )
+            if st.button("🗑️ Limpar Todas Fotos", key=f"fotos_limpar_{caso_id}",
+                         disabled=not (confirmar_limpeza and fotos_salvas)):
+                candidato_fotos = copy.deepcopy(p_salvo)
+                candidato_fotos["campo_fotos"] = []
+                if salvar_processo(caso_id, candidato_fotos):
+                    st.rerun()
+                else:
+                    st.error("❌ Não foi possível limpar as fotos.")
         if not fotos_salvas:
             st.info("Nenhuma foto cadastrada.")
         else:

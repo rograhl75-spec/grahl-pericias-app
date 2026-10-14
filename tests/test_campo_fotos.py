@@ -8,6 +8,7 @@ from core.campo_fotos import (
     criar_foto,
     estimar_tamanho_documento,
     ids_fotos,
+    resumo_armazenamento,
     separar_por_limite,
 )
 
@@ -36,6 +37,17 @@ class CampoFotosTests(unittest.TestCase):
         self.assertLessEqual(
             estimar_tamanho_documento({**base, "campo_fotos": cabem}), DOC_SIZE_BUDGET_BYTES)
 
+
+    def test_resumo_armazenamento_distingue_salvas_e_pendentes(self):
+        dados = {"campo_fotos": [criar_foto(b"a"), criar_foto(b"b")]}
+        resumo = resumo_armazenamento(dados, [criar_foto(b"c")])
+        self.assertEqual((resumo["salvas"], resumo["pendentes"]), (2, 1))
+        self.assertEqual(resumo["bytes_usados"], estimar_tamanho_documento(dados))
+        self.assertEqual(resumo["bytes_limite"], DOC_SIZE_BUDGET_BYTES)
+        self.assertGreater(resumo["fracao_usada"], 0)
+        cheio = resumo_armazenamento({"campo_fotos": [], "x": "y" * DOC_SIZE_BUDGET_BYTES})
+        self.assertEqual(cheio["fracao_usada"], 1.0)
+        self.assertEqual(resumo_armazenamento(None)["salvas"], 0)
 
 class DatabaseIntegridadeTests(unittest.TestCase):
     def test_excluir_processo_informa_resultado(self):

@@ -115,7 +115,9 @@ campo. Corrija manualmente, pelo próprio app, somente depois de confirmar a ori
 ## 5. Checklist para validar no celular em campo
 1. Crie dois casos sintéticos, “TESTE A” e “TESTE B”, com o mesmo nome de reclamante.
 2. Selecione A na barra lateral. Confira se o cabeçalho e o placeholder dos campos mostram o ID de A.
-3. Em Diligência, envie 3 fotos. Confira se aparece “Gerenciar Fotos (3)” e se o uploader fica vazio.
+3. Em Diligência, envie 3 fotos. Confira se aparece “Gerenciar Fotos (3 fotos salvas na nuvem)”, se o
+   uploader fica vazio e se a área de adição continua aberta para o próximo lote. Feche a área e
+   reabra pelo botão grande “➕ Adicionar novas fotos” (fora dos cartões das imagens).
 4. Edite a legenda da foto 1 e toque em Atualizar. Depois envie mais 2 fotos (2º ciclo). Confira se
    aparecem 5 fotos, sem duplicatas, e se a legenda da foto 1 foi mantida.
 5. Envie de novo uma foto já salva. Deve aparecer o aviso “ignorada”, sem duplicar.
@@ -126,5 +128,6 @@ campo. Corrija manualmente, pelo próprio app, somente depois de confirmar a ori
 9. Recarregue a página ou feche e reabra o navegador. O caso ativo deve continuar o mesmo (URL `?caso=`).
 10. Ative o modo avião e envie uma foto. Ela deve ficar como pendente; volte a ficar online e use
     “Tentar salvar”.
-11. Observe o indicador “Armazenamento deste caso” perto do limite e confirme se a mensagem é clara.
+11. Observe o quadro “📍 Onde ficam as fotos” (salvas na nuvem × pendentes nesta sessão e espaço do
+    caso) perto do limite e confirme se a mensagem é clara.
 12. No final, exclua os casos de teste.
