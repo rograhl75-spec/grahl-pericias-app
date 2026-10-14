@@ -130,45 +130,6 @@ def salvar_processo(id_proc, dados_proc):
         return False
 
 
-def salvar_processo_com_importacao(id_proc, dados_proc, registro_importacao):
-    try:
-        if not isinstance(registro_importacao, dict):
-            raise ValueError("O registro de importação deve ser um dicionário.")
-
-        dados_normalizados = _normalizar_dados_processo(dados_proc)
-        esperada = int(dados_proc.get("_revision", 0) or 0)
-        db = _obter_db()
-        transaction = db.transaction()
-
-        processo_ref = db.collection("processos").document(id_proc)
-        importacao_ref = db.collection("importacoes_ia").document()
-
-        @firestore.transactional
-        def _salvar_importacao(transaction):
-            snapshot = processo_ref.get(transaction=transaction)
-            revisao_atual = int((snapshot.to_dict() or {}).get("_revision", 0) or 0) if snapshot.exists else 0
-            if revisao_atual != esperada:
-                raise ProcessoAlteradoError(
-                    "Este processo foi alterado por outro usuário durante a importação. "
-                    "Recarregue os dados e confirme a importação novamente."
-                )
-            dados_normalizados["_revision"] = esperada + 1
-            transaction.set(processo_ref, dados_normalizados)
-            transaction.set(importacao_ref, registro_importacao)
-            return esperada + 1
-
-        nova_revisao = _salvar_importacao(transaction)
-        st.session_state.setdefault("_process_revision_snapshot", {})[id_proc] = nova_revisao
-        return True
-    except Exception as exc:
-        logging.exception("Falha ao salvar processo importado %s", id_proc)
-        if isinstance(exc, ProcessoAlteradoError):
-            st.error(str(exc))
-        else:
-            st.error(f"Erro ao salvar processo importado: {exc}")
-        return False
-
-
 def excluir_processo(id_proc):
     try:
         _obter_db().collection("processos").document(id_proc).delete()
